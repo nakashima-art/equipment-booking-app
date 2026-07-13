@@ -337,6 +337,7 @@ def init_session() -> None:
         "saved_name": "",
         "saved_affiliation": "",
         "saved_instrument_id": None,
+        "saved_instrument_order": [],
         "pending_browser_action": None,
     }
     for key, value in defaults.items():
@@ -353,7 +354,8 @@ def load_browser_profile() -> bool:
             screen_width: window.innerWidth,
             user_name: localStorage.getItem("equipment_booking_name") || "",
             affiliation: localStorage.getItem("equipment_booking_affiliation") || "",
-            instrument_id: localStorage.getItem("equipment_booking_last_instrument") || ""
+            instrument_id: localStorage.getItem("equipment_booking_last_instrument") || "",
+            instrument_order: localStorage.getItem("equipment_booking_instrument_order") || "[]"
         })
         """,
         key="browser_profile_loader",
@@ -371,16 +373,40 @@ def load_browser_profile() -> bool:
             saved_instrument_id = int(profile.get("instrument_id", ""))
         except (TypeError, ValueError):
             saved_instrument_id = None
+
+        order_value = profile.get("instrument_order", "[]")
+
+        if isinstance(order_value, str):
+            parsed_order = json.loads(order_value)
+        else:
+            parsed_order = order_value
+
+        if not isinstance(parsed_order, list):
+            parsed_order = []
+
+        saved_instrument_order = []
+
+        for item in parsed_order:
+            try:
+                instrument_id = int(item)
+            except (TypeError, ValueError):
+                continue
+
+            if instrument_id not in saved_instrument_order:
+                saved_instrument_order.append(instrument_id)
+
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         screen_width = 1200
         saved_name = ""
         saved_affiliation = ""
         saved_instrument_id = None
+        saved_instrument_order = []
 
     st.session_state["screen_width"] = screen_width
     st.session_state["saved_name"] = saved_name
     st.session_state["saved_affiliation"] = saved_affiliation
     st.session_state["saved_instrument_id"] = saved_instrument_id
+    st.session_state["saved_instrument_order"] = saved_instrument_order
     st.session_state["browser_profile_loaded"] = True
     return True
 
@@ -399,6 +425,38 @@ def queue_browser_profile_save(
         "user_name": user_name,
         "affiliation": affiliation,
         "instrument_id": instrument_id,
+    }
+
+
+def queue_instrument_order_save(
+    instrument_order: list[int],
+) -> None:
+    normalized_order: list[int] = []
+
+    for instrument_id in instrument_order:
+        try:
+            normalized_id = int(instrument_id)
+        except (TypeError, ValueError):
+            continue
+
+        if normalized_id not in normalized_order:
+            normalized_order.append(normalized_id)
+
+    st.session_state["saved_instrument_order"] = normalized_order
+
+    st.session_state["pending_browser_action"] = {
+        "action": "save_order",
+        "token": secrets.token_hex(8),
+        "instrument_order": normalized_order,
+    }
+
+
+def queue_instrument_order_reset() -> None:
+    st.session_state["saved_instrument_order"] = []
+
+    st.session_state["pending_browser_action"] = {
+        "action": "reset_order",
+        "token": secrets.token_hex(8),
     }
 
 
@@ -421,20 +479,49 @@ def flush_pending_browser_action() -> bool:
 
     token = pending["token"]
 
-    if pending["action"] == "save":
+    action = pending["action"]
+
+    if action == "save":
         script = f"""
         localStorage.setItem("equipment_booking_name", {json.dumps(pending['user_name'])});
         localStorage.setItem("equipment_booking_affiliation", {json.dumps(pending['affiliation'])});
         localStorage.setItem("equipment_booking_last_instrument", {json.dumps(str(pending['instrument_id']))});
         "saved";
         """
-    else:
+
+    elif action == "clear":
         script = """
         localStorage.removeItem("equipment_booking_name");
         localStorage.removeItem("equipment_booking_affiliation");
         localStorage.removeItem("equipment_booking_last_instrument");
         "cleared";
         """
+
+    elif action == "save_order":
+        order_json = json.dumps(
+            pending["instrument_order"],
+            ensure_ascii=False,
+        )
+
+        script = f"""
+        localStorage.setItem(
+            "equipment_booking_instrument_order",
+            {json.dumps(order_json)}
+        );
+        "order_saved";
+        """
+
+    elif action == "reset_order":
+        script = """
+        localStorage.removeItem(
+            "equipment_booking_instrument_order"
+        );
+        "order_reset";
+        """
+
+    else:
+        st.session_state["pending_browser_action"] = None
+        return True
 
     result = streamlit_js_eval(
         js_expressions=script,
@@ -2147,10 +2234,230 @@ def render_edit_reservation_page(
 
 
 # ============================================================
+# Instrument display order
+# ============================================================
+
+def normalize_instrument_order(
+    instruments: list[sqlite3.Row],
+    saved_order: list[int] | None = None,
+) -> list[int]:
+    available_ids = [
+        instrument["id"]
+        for instrument in instruments
+    ]
+
+    normalized: list[int] = []
+
+    for instrument_id in (
+        saved_order
+        if saved_order is not None
+        else st.session_state.get(
+            "saved_instrument_order",
+            [],
+        )
+    ):
+        if (
+            instrument_id in available_ids
+            and instrument_id not in normalized
+        ):
+            normalized.append(
+                instrument_id
+            )
+
+    for instrument_id in available_ids:
+        if instrument_id not in normalized:
+            normalized.append(
+                instrument_id
+            )
+
+    return normalized
+
+
+def sort_instruments_for_browser(
+    instruments: list[sqlite3.Row],
+) -> list[sqlite3.Row]:
+    order = normalize_instrument_order(
+        instruments
+    )
+
+    order_index = {
+        instrument_id: index
+        for index, instrument_id in enumerate(
+            order
+        )
+    }
+
+    return sorted(
+        instruments,
+        key=lambda instrument: order_index[
+            instrument["id"]
+        ],
+    )
+
+
+def render_instrument_order_settings(
+    instruments: list[sqlite3.Row],
+) -> None:
+    default_order = [
+        instrument["id"]
+        for instrument in instruments
+    ]
+
+    normalized_saved_order = (
+        normalize_instrument_order(
+            instruments
+        )
+    )
+
+    draft_key = "instrument_order_draft"
+
+    draft_order = st.session_state.get(
+        draft_key
+    )
+
+    if (
+        not isinstance(
+            draft_order,
+            list,
+        )
+        or set(draft_order)
+        != set(default_order)
+        or len(draft_order)
+        != len(default_order)
+    ):
+        st.session_state[
+            draft_key
+        ] = normalized_saved_order.copy()
+
+    with st.expander(
+        "機器表示順の設定"
+    ):
+        st.caption(
+            "このブラウザでの機器表示順を変更できます。"
+        )
+
+        instrument_by_id = {
+            instrument["id"]: instrument
+            for instrument in instruments
+        }
+
+        current_order = st.session_state[
+            draft_key
+        ].copy()
+
+        for index, instrument_id in enumerate(
+            current_order
+        ):
+            instrument = instrument_by_id[
+                instrument_id
+            ]
+
+            col_name, col_up, col_down = st.columns(
+                [6, 1, 1]
+            )
+
+            with col_name:
+                st.write(
+                    instrument["name"]
+                )
+
+            with col_up:
+                if st.button(
+                    "↑",
+                    disabled=index == 0,
+                    key=(
+                        "instrument_order_up_"
+                        f"{instrument_id}"
+                    ),
+                    help="上へ移動",
+                    use_container_width=True,
+                ):
+                    current_order[
+                        index - 1
+                    ], current_order[
+                        index
+                    ] = (
+                        current_order[index],
+                        current_order[index - 1],
+                    )
+
+                    st.session_state[
+                        draft_key
+                    ] = current_order
+
+                    st.rerun()
+
+            with col_down:
+                if st.button(
+                    "↓",
+                    disabled=(
+                        index
+                        == len(
+                            current_order
+                        ) - 1
+                    ),
+                    key=(
+                        "instrument_order_down_"
+                        f"{instrument_id}"
+                    ),
+                    help="下へ移動",
+                    use_container_width=True,
+                ):
+                    current_order[
+                        index + 1
+                    ], current_order[
+                        index
+                    ] = (
+                        current_order[index],
+                        current_order[index + 1],
+                    )
+
+                    st.session_state[
+                        draft_key
+                    ] = current_order
+
+                    st.rerun()
+
+        save_col, reset_col = st.columns(2)
+
+        with save_col:
+            if st.button(
+                "表示順を保存",
+                type="primary",
+                use_container_width=True,
+                key="save_instrument_order",
+            ):
+                queue_instrument_order_save(
+                    st.session_state[
+                        draft_key
+                    ]
+                )
+
+                st.rerun()
+
+        with reset_col:
+            if st.button(
+                "初期順に戻す",
+                use_container_width=True,
+                key="reset_instrument_order",
+            ):
+                st.session_state[
+                    draft_key
+                ] = default_order.copy()
+
+                queue_instrument_order_reset()
+
+                st.rerun()
+
+
+# ============================================================
 # Booking page
 # ============================================================
 
-def render_booking_page(instrument_id: int) -> None:
+def render_booking_page(
+    instrument_id: int,
+    instruments: list[sqlite3.Row],
+) -> None:
     instrument = get_instrument(instrument_id)
 
     if instrument is None:
@@ -2240,6 +2547,12 @@ def render_booking_page(instrument_id: int) -> None:
         blocked_periods,
         instrument_id,
         compact_mode=mobile and view_mode == "週間",
+    )
+
+    st.divider()
+
+    render_instrument_order_settings(
+        instruments
     )
 
     st.divider()
@@ -3116,13 +3429,21 @@ def main() -> None:
         page_management()
         return
 
-    instruments = get_instruments(active_only=True)
+    base_instruments = get_instruments(
+        active_only=True
+    )
 
-    if not instruments:
+    if not base_instruments:
         st.info("現在、予約可能な機器は登録されていません。")
         return
 
-    current_instrument_id = resolve_instrument_id(instruments)
+    instruments = sort_instruments_for_browser(
+        base_instruments
+    )
+
+    current_instrument_id = resolve_instrument_id(
+        instruments
+    )
 
     st.sidebar.divider()
     st.sidebar.subheader("機器選択")
@@ -3188,7 +3509,10 @@ def main() -> None:
 
         return
 
-    render_booking_page(current_instrument_id)
+    render_booking_page(
+        current_instrument_id,
+        base_instruments,
+    )
 
 
 if __name__ == "__main__":
