@@ -65,6 +65,76 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     }
 
 
+def migrate_instrument_managers_schema(conn: sqlite3.Connection) -> None:
+    """Migrate the legacy manager_email schema to the current manager_id schema."""
+    columns = table_columns(conn, "instrument_managers")
+
+    if {"instrument_id", "manager_id"}.issubset(columns):
+        return
+
+    if "manager_email" not in columns:
+        raise RuntimeError(
+            "instrument_managers テーブルの構造を認識できません。"
+        )
+
+    backup_exists = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'instrument_managers_legacy_email'
+        """
+    ).fetchone()
+
+    if backup_exists is None:
+        conn.execute(
+            """
+            CREATE TABLE instrument_managers_legacy_email AS
+            SELECT *
+            FROM instrument_managers
+            """
+        )
+
+    conn.execute("DROP TABLE IF EXISTS instrument_managers_new")
+
+    conn.execute(
+        """
+        CREATE TABLE instrument_managers_new (
+            instrument_id INTEGER NOT NULL,
+            manager_id INTEGER NOT NULL,
+            UNIQUE(instrument_id, manager_id),
+            FOREIGN KEY (instrument_id)
+                REFERENCES instruments(id) ON DELETE CASCADE,
+            FOREIGN KEY (manager_id)
+                REFERENCES manager_accounts(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO instrument_managers_new (
+            instrument_id,
+            manager_id
+        )
+        SELECT
+            legacy.instrument_id,
+            accounts.id
+        FROM instrument_managers legacy
+        JOIN manager_accounts accounts
+            ON lower(accounts.username) = lower(legacy.manager_email)
+        """
+    )
+
+    conn.execute("DROP TABLE instrument_managers")
+    conn.execute(
+        """
+        ALTER TABLE instrument_managers_new
+        RENAME TO instrument_managers
+        """
+    )
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.executescript(
@@ -158,6 +228,8 @@ def init_db() -> None:
             );
             """
         )
+
+        migrate_instrument_managers_schema(conn)
 
         columns = table_columns(conn, "reservations")
 
