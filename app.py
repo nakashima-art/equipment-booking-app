@@ -1021,14 +1021,22 @@ def build_calendar_html(
 ) -> str:
 
     column_count = len(dates)
+    slot_count = len(CALENDAR_TIMES)
 
     minimum_width = (
-        110
+        90
         + column_count * 170
     )
 
     css = f"""
     <style>
+    html,
+    body {{
+        margin: 0;
+        padding: 0;
+        background: transparent;
+    }}
+
     .booking-scroll {{
         width: 100%;
         overflow-x: auto;
@@ -1040,76 +1048,121 @@ def build_calendar_html(
 
     .booking-calendar {{
         min-width: {minimum_width}px;
+
         display: grid;
+
         grid-template-columns:
-            90px repeat({column_count}, minmax(160px, 1fr));
+            90px repeat(
+                {column_count},
+                minmax(160px, 1fr)
+            );
+
+        grid-template-rows:
+            48px repeat(
+                {slot_count},
+                {SLOT_HEIGHT}px
+            );
+
+        position: relative;
+
         font-family:
             -apple-system,
             BlinkMacSystemFont,
             "Segoe UI",
             sans-serif;
+
         font-size: 13px;
     }}
 
     .calendar-header {{
         position: sticky;
         top: 0;
-        z-index: 5;
+        z-index: 10;
+
         padding: 10px 4px;
+
         text-align: center;
         font-weight: 600;
+
         border-right: 1px solid #d9d9d9;
         border-bottom: 1px solid #bdbdbd;
+
         background: #f7f7f7;
+
+        box-sizing: border-box;
     }}
 
     .calendar-time {{
-        min-height: {SLOT_HEIGHT}px;
         box-sizing: border-box;
+
         padding: 3px 8px;
+
         text-align: right;
+
         color: #666;
+
         border-right: 1px solid #d9d9d9;
         border-bottom: 1px solid #eeeeee;
+
         background: #fafafa;
+
         font-size: 11px;
     }}
 
     .calendar-cell {{
-        min-height: {SLOT_HEIGHT}px;
         box-sizing: border-box;
+
         border-right: 1px solid #e0e0e0;
         border-bottom: 1px solid #eeeeee;
-        padding: 2px;
+
+        background: white;
     }}
 
-    .calendar-cell-hour {{
+    .calendar-hour {{
         border-top: 1px solid #c9c9c9;
     }}
 
     .reservation-block {{
-        height: 100%;
-        min-height: 23px;
+        z-index: 3;
+
+        margin: 2px;
+
         box-sizing: border-box;
+
         border-radius: 4px;
-        padding: 3px 5px;
+
+        padding: 4px 6px;
+
         background: #dbeafe;
+
         border-left: 4px solid #2563eb;
+
         color: #1f2937;
+
         overflow: hidden;
+
         line-height: 1.25;
     }}
 
     .blocked-block {{
-        height: 100%;
-        min-height: 23px;
+        z-index: 3;
+
+        margin: 2px;
+
         box-sizing: border-box;
+
         border-radius: 4px;
-        padding: 3px 5px;
+
+        padding: 4px 6px;
+
         background: #f3f4f6;
+
         border-left: 4px solid #6b7280;
+
         color: #374151;
+
         overflow: hidden;
+
         line-height: 1.25;
     }}
 
@@ -1129,11 +1182,27 @@ def build_calendar_html(
         '<div class="booking-calendar">',
     ]
 
+    # ========================================================
+    # Header
+    # ========================================================
+
     content.append(
-        '<div class="calendar-header">時刻</div>'
+        """
+        <div
+            class="calendar-header"
+            style="
+                grid-column: 1;
+                grid-row: 1;
+            "
+        >
+            時刻
+        </div>
+        """
     )
 
-    for target_date in dates:
+    for day_index, target_date in enumerate(
+        dates
+    ):
 
         date_label = html.escape(
             format_japanese_date(
@@ -1141,13 +1210,35 @@ def build_calendar_html(
             )
         )
 
-        content.append(
-            f'<div class="calendar-header">'
-            f'{date_label}'
-            f'</div>'
+        grid_column = (
+            day_index + 2
         )
 
-    for slot_time in CALENDAR_TIMES:
+        content.append(
+            f"""
+            <div
+                class="calendar-header"
+                style="
+                    grid-column: {grid_column};
+                    grid-row: 1;
+                "
+            >
+                {date_label}
+            </div>
+            """
+        )
+
+    # ========================================================
+    # Background time grid
+    # ========================================================
+
+    for slot_index, slot_time in enumerate(
+        CALENDAR_TIMES
+    ):
+
+        grid_row = (
+            slot_index + 2
+        )
 
         minute = int(
             slot_time.split(":")[1]
@@ -1159,155 +1250,279 @@ def build_calendar_html(
             else ""
         )
 
-        content.append(
-            f'<div class="calendar-time">'
-            f'{html.escape(time_label)}'
-            f'</div>'
+        hour_class = (
+            " calendar-hour"
+            if minute == 0
+            else ""
         )
 
-        for target_date in dates:
+        content.append(
+            f"""
+            <div
+                class="calendar-time{hour_class}"
+                style="
+                    grid-column: 1;
+                    grid-row: {grid_row};
+                "
+            >
+                {html.escape(time_label)}
+            </div>
+            """
+        )
 
-            item = get_calendar_item_for_slot(
-                reservations,
-                blocked_periods,
-                target_date,
-                slot_time,
+        for day_index, _ in enumerate(
+            dates
+        ):
+
+            grid_column = (
+                day_index + 2
             )
-
-            extra_class = (
-                " calendar-cell-hour"
-                if minute == 0
-                else ""
-            )
-
-            if item is None:
-
-                content.append(
-                    f'<div class="calendar-cell'
-                    f'{extra_class}"></div>'
-                )
-
-                continue
-
-            item_type, row = item
-
-            is_start = (
-                row["start_time"]
-                == slot_time
-            )
-
-            if not is_start:
-
-                content.append(
-                    f'<div class="calendar-cell'
-                    f'{extra_class}"></div>'
-                )
-
-                continue
-
-            duration_minutes = (
-                to_minutes(row["end_time"])
-                - to_minutes(row["start_time"])
-            )
-
-            slot_count = max(
-                1,
-                duration_minutes // 15,
-            )
-
-            block_height = (
-                SLOT_HEIGHT * slot_count
-                - 4
-            )
-
-            if item_type == "reservation":
-
-                name = html.escape(
-                    row["user_name"]
-                )
-
-                purpose = html.escape(
-                    purpose_label(row)
-                )
-
-                affiliation = html.escape(
-                    row["affiliation"]
-                )
-
-                time_text = html.escape(
-                    f"{row['start_time']}–"
-                    f"{row['end_time']}"
-                )
-
-                block_html = f"""
-                <div
-                    class="reservation-block"
-                    style="
-                        height:{block_height}px;
-                        position:relative;
-                        z-index:2;
-                    "
-                >
-                    <div class="calendar-name">
-                        {name}
-                    </div>
-                    <div class="calendar-small">
-                        {purpose}
-                    </div>
-                    <div class="calendar-small">
-                        {time_text}
-                    </div>
-                    <div class="calendar-small">
-                        {affiliation}
-                    </div>
-                </div>
-                """
-
-            else:
-
-                reason = html.escape(
-                    row["reason"]
-                    or "使用停止"
-                )
-
-                time_text = html.escape(
-                    f"{row['start_time']}–"
-                    f"{row['end_time']}"
-                )
-
-                block_html = f"""
-                <div
-                    class="blocked-block"
-                    style="
-                        height:{block_height}px;
-                        position:relative;
-                        z-index:2;
-                    "
-                >
-                    <div class="calendar-name">
-                        使用停止
-                    </div>
-                    <div class="calendar-small">
-                        {reason}
-                    </div>
-                    <div class="calendar-small">
-                        {time_text}
-                    </div>
-                </div>
-                """
 
             content.append(
-                f'<div class="calendar-cell'
-                f'{extra_class}">'
-                f'{block_html}'
-                f'</div>'
+                f"""
+                <div
+                    class="calendar-cell{hour_class}"
+                    style="
+                        grid-column: {grid_column};
+                        grid-row: {grid_row};
+                    "
+                ></div>
+                """
             )
 
-    content.append("</div>")
-    content.append("</div>")
+    # ========================================================
+    # Reservations
+    # ========================================================
 
-    return "".join(content)
+    calendar_start_minutes = (
+        CALENDAR_START_HOUR * 60
+    )
 
+    date_column_map = {
+        target_date.isoformat():
+            day_index + 2
+        for day_index, target_date
+        in enumerate(dates)
+    }
+
+    for reservation in reservations:
+
+        reservation_date = reservation[
+            "reservation_date"
+        ]
+
+        if (
+            reservation_date
+            not in date_column_map
+        ):
+            continue
+
+        start_minutes = to_minutes(
+            reservation["start_time"]
+        )
+
+        end_minutes = to_minutes(
+            reservation["end_time"]
+        )
+
+        if (
+            end_minutes
+            <= calendar_start_minutes
+        ):
+            continue
+
+        start_slot = max(
+            0,
+            (
+                start_minutes
+                - calendar_start_minutes
+            )
+            // 15,
+        )
+
+        end_slot = min(
+            slot_count,
+            (
+                end_minutes
+                - calendar_start_minutes
+            )
+            // 15,
+        )
+
+        span = (
+            end_slot - start_slot
+        )
+
+        if span <= 0:
+            continue
+
+        grid_column = date_column_map[
+            reservation_date
+        ]
+
+        grid_row = (
+            start_slot + 2
+        )
+
+        name = html.escape(
+            reservation["user_name"]
+        )
+
+        affiliation = html.escape(
+            reservation["affiliation"]
+        )
+
+        purpose = html.escape(
+            purpose_label(
+                reservation
+            )
+        )
+
+        time_text = html.escape(
+            f"{reservation['start_time']}"
+            f"–{reservation['end_time']}"
+        )
+
+        content.append(
+            f"""
+            <div
+                class="reservation-block"
+                style="
+                    grid-column: {grid_column};
+                    grid-row:
+                        {grid_row}
+                        / span {span};
+                "
+            >
+                <div class="calendar-name">
+                    {name}
+                </div>
+
+                <div class="calendar-small">
+                    {purpose}
+                </div>
+
+                <div class="calendar-small">
+                    {time_text}
+                </div>
+
+                <div class="calendar-small">
+                    {affiliation}
+                </div>
+            </div>
+            """
+        )
+
+    # ========================================================
+    # Blocked periods
+    # ========================================================
+
+    for blocked in blocked_periods:
+
+        blocked_date = blocked[
+            "reservation_date"
+        ]
+
+        if (
+            blocked_date
+            not in date_column_map
+        ):
+            continue
+
+        start_minutes = to_minutes(
+            blocked["start_time"]
+        )
+
+        end_minutes = to_minutes(
+            blocked["end_time"]
+        )
+
+        if (
+            end_minutes
+            <= calendar_start_minutes
+        ):
+            continue
+
+        start_slot = max(
+            0,
+            (
+                start_minutes
+                - calendar_start_minutes
+            )
+            // 15,
+        )
+
+        end_slot = min(
+            slot_count,
+            (
+                end_minutes
+                - calendar_start_minutes
+            )
+            // 15,
+        )
+
+        span = (
+            end_slot - start_slot
+        )
+
+        if span <= 0:
+            continue
+
+        grid_column = date_column_map[
+            blocked_date
+        ]
+
+        grid_row = (
+            start_slot + 2
+        )
+
+        reason = html.escape(
+            blocked["reason"]
+            or "使用停止"
+        )
+
+        time_text = html.escape(
+            f"{blocked['start_time']}"
+            f"–{blocked['end_time']}"
+        )
+
+        content.append(
+            f"""
+            <div
+                class="blocked-block"
+                style="
+                    grid-column: {grid_column};
+                    grid-row:
+                        {grid_row}
+                        / span {span};
+                "
+            >
+                <div class="calendar-name">
+                    使用停止
+                </div>
+
+                <div class="calendar-small">
+                    {reason}
+                </div>
+
+                <div class="calendar-small">
+                    {time_text}
+                </div>
+            </div>
+            """
+        )
+
+    content.append(
+        "</div>"
+    )
+
+    content.append(
+        "</div>"
+    )
+
+    return "".join(
+        content
+    )
 
 def render_calendar(
     dates: list[date],
