@@ -158,6 +158,14 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS system_admin_credentials (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS instrument_managers (
                 instrument_id INTEGER NOT NULL,
                 manager_id INTEGER NOT NULL,
@@ -257,6 +265,33 @@ def init_db() -> None:
                 SET end_date = reservation_date
                 WHERE end_date IS NULL OR end_date = ''
                 """
+            )
+
+        admin_row = conn.execute(
+            """
+            SELECT id
+            FROM system_admin_credentials
+            WHERE id = 1
+            """
+        ).fetchone()
+
+        if admin_row is None:
+            salt, password_hash = make_hash(SYSTEM_ADMIN_PASSWORD)
+            conn.execute(
+                """
+                INSERT INTO system_admin_credentials (
+                    id,
+                    username,
+                    password_salt,
+                    password_hash
+                )
+                VALUES (1, ?, ?, ?)
+                """,
+                (
+                    SYSTEM_ADMIN_USERNAME,
+                    salt,
+                    password_hash,
+                ),
             )
 
 
@@ -897,11 +932,28 @@ def logout() -> None:
 def authenticate(username: str, password: str) -> bool:
     username = username.strip()
 
-    if username == SYSTEM_ADMIN_USERNAME and password == SYSTEM_ADMIN_PASSWORD:
+    with get_connection() as conn:
+        admin_account = conn.execute(
+            """
+            SELECT *
+            FROM system_admin_credentials
+            WHERE id = 1 AND username = ?
+            """,
+            (username,),
+        ).fetchone()
+
+    if (
+        admin_account is not None
+        and verify_hash(
+            password,
+            admin_account["password_salt"],
+            admin_account["password_hash"],
+        )
+    ):
         st.session_state["logged_in"] = True
         st.session_state["role"] = "system_admin"
         st.session_state["manager_id"] = None
-        st.session_state["username"] = username
+        st.session_state["username"] = admin_account["username"]
         st.session_state["display_name"] = "システム管理者"
         return True
 
@@ -931,6 +983,125 @@ def authenticate(username: str, password: str) -> bool:
     st.session_state["username"] = account["username"]
     st.session_state["display_name"] = account["display_name"]
     return True
+
+
+def verify_current_user_password(password: str) -> bool:
+    role = st.session_state.get("role")
+
+    if role == "system_admin":
+        with get_connection() as conn:
+            account = conn.execute(
+                """
+                SELECT *
+                FROM system_admin_credentials
+                WHERE id = 1
+                """
+            ).fetchone()
+
+    elif role == "instrument_manager":
+        manager_id = st.session_state.get("manager_id")
+        if manager_id is None:
+            return False
+
+        with get_connection() as conn:
+            account = conn.execute(
+                """
+                SELECT *
+                FROM manager_accounts
+                WHERE id = ?
+                """,
+                (manager_id,),
+            ).fetchone()
+
+    else:
+        return False
+
+    if account is None:
+        return False
+
+    return verify_hash(
+        password,
+        account["password_salt"],
+        account["password_hash"],
+    )
+
+
+def change_current_user_password(new_password: str) -> None:
+    salt, password_hash = make_hash(new_password)
+    role = st.session_state.get("role")
+
+    with get_connection() as conn:
+        if role == "system_admin":
+            conn.execute(
+                """
+                UPDATE system_admin_credentials
+                SET
+                    password_salt = ?,
+                    password_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                """,
+                (
+                    salt,
+                    password_hash,
+                ),
+            )
+
+        elif role == "instrument_manager":
+            manager_id = st.session_state.get("manager_id")
+            if manager_id is None:
+                raise RuntimeError("機器管理者情報を確認できません。")
+
+            conn.execute(
+                """
+                UPDATE manager_accounts
+                SET
+                    password_salt = ?,
+                    password_hash = ?
+                WHERE id = ?
+                """,
+                (
+                    salt,
+                    password_hash,
+                    manager_id,
+                ),
+            )
+
+        else:
+            raise RuntimeError("ログイン情報を確認できません。")
+
+
+def render_own_password_change() -> None:
+    with st.expander("パスワード変更"):
+        with st.form("own_password_change_form"):
+            current_password = st.text_input(
+                "現在のパスワード *",
+                type="password",
+            )
+            new_password = st.text_input(
+                "新しいパスワード *",
+                type="password",
+            )
+            new_password_confirm = st.text_input(
+                "新しいパスワード（確認） *",
+                type="password",
+            )
+            submitted = st.form_submit_button("パスワードを変更")
+
+        if submitted:
+            if not current_password:
+                st.error("現在のパスワードを入力してください。")
+            elif not verify_current_user_password(current_password):
+                st.error("現在のパスワードが正しくありません。")
+            elif len(new_password) < 8:
+                st.error("新しいパスワードは8文字以上にしてください。")
+            elif new_password != new_password_confirm:
+                st.error("新しいパスワードが一致しません。")
+            elif new_password == current_password:
+                st.error("現在とは異なるパスワードを設定してください。")
+            else:
+                change_current_user_password(new_password)
+                st.success("パスワードを変更しました。")
 
 
 def get_managed_instrument_ids(manager_id: int) -> list[int]:
@@ -1254,7 +1425,8 @@ def build_calendar_html(
                     f"&start_time={slot_time}"
                 )
                 content.append(
-                    f'<a class="cell-link{hour_class}" href="{href}" target="_top" '
+                    f'<a class="cell-link{hour_class}" href="#" '
+                    f'onclick="window.parent.location.href=\'{href}\'; return false;" '
                     f'title="この時刻から予約" '
                     f'style="grid-column:{grid_column};grid-row:{grid_row};"></a>'
                 )
@@ -1297,7 +1469,8 @@ def build_calendar_html(
             )
 
             content.append(
-                f'<a class="reservation-link" href="{href}" target="_top" '
+                f'<a class="reservation-link" href="#" '
+                f'onclick="window.parent.location.href=\'{href}\'; return false;" '
                 f'style="grid-column:{grid_column};'
                 f'grid-row:{grid_row} / span {span};">'
                 f'<div class="reservation">'
@@ -2808,6 +2981,8 @@ def manager_reservation_management() -> None:
 def page_management() -> None:
     if not render_login():
         return
+
+    render_own_password_change()
 
     if st.session_state["role"] == "system_admin":
         tabs = st.tabs(
