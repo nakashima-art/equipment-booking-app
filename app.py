@@ -42,6 +42,22 @@ st.markdown(
         textarea {min-height: 90px;}
         [data-testid="stSidebar"] {min-width: 260px;}
     }
+
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        padding-bottom: 3.5rem;
+    }
+
+    [data-testid="stSidebar"] .creator-info {
+        position: fixed;
+        left: 1rem;
+        bottom: 0.75rem;
+        z-index: 1000;
+        font-size: 0.75rem;
+        color: #777;
+        line-height: 1.4;
+        white-space: nowrap;
+        pointer-events: none;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2682,13 +2698,6 @@ def render_booking_page(
 
     st.divider()
 
-    if st.button(
-        "保存された利用者情報をクリア",
-        use_container_width=mobile,
-    ):
-        queue_browser_profile_clear()
-        st.rerun()
-
 
 # ============================================================
 # Manager login
@@ -3776,7 +3785,7 @@ def main() -> None:
 
     with st.sidebar.expander("利用端末の認証"):
         st.caption(
-            "この端末に保存された利用認証を解除します。"
+            "この端末に保存された認証情報や利用者情報を管理します。"
         )
 
         if st.button(
@@ -3787,14 +3796,17 @@ def main() -> None:
             queue_access_authorization_clear()
             st.rerun()
 
+        if st.button(
+            "保存された利用者情報をクリア",
+            use_container_width=True,
+            key="clear_saved_user_profile",
+        ):
+            queue_browser_profile_clear()
+            st.rerun()
+
     st.sidebar.markdown(
         """
-        <div style="
-            margin-top: 1rem;
-            font-size: 0.75rem;
-            color: #777;
-            line-height: 1.4;
-        ">
+        <div class="creator-info">
             作成者：中島（薬用資源学講座）
         </div>
         """,
