@@ -17,6 +17,7 @@ DB_PATH = "equipment_booking.db"
 
 SYSTEM_ADMIN_USERNAME = "admin"
 SYSTEM_ADMIN_PASSWORD = "1234"
+APP_ACCESS_CODE = "agupharma"
 
 SLOT_MINUTES = 15
 SLOT_HEIGHT = 24
@@ -338,6 +339,8 @@ def init_session() -> None:
         "saved_affiliation": "",
         "saved_instrument_id": None,
         "saved_instrument_order": [],
+        "access_authorized": False,
+        "access_state_loaded": False,
         "pending_browser_action": None,
         "pending_scroll_top": False,
         "scroll_top_token": None,
@@ -357,7 +360,8 @@ def load_browser_profile() -> bool:
             user_name: localStorage.getItem("equipment_booking_name") || "",
             affiliation: localStorage.getItem("equipment_booking_affiliation") || "",
             instrument_id: localStorage.getItem("equipment_booking_last_instrument") || "",
-            instrument_order: localStorage.getItem("equipment_booking_instrument_order") || "[]"
+            instrument_order: localStorage.getItem("equipment_booking_instrument_order") || "[]",
+            access_authorized: localStorage.getItem("equipment_booking_access_authorized") || ""
         })
         """,
         key="browser_profile_loader",
@@ -387,6 +391,9 @@ def load_browser_profile() -> bool:
             parsed_order = []
 
         saved_instrument_order = []
+        access_authorized = (
+            str(profile.get("access_authorized", "")) == "authorized"
+        )
 
         for item in parsed_order:
             try:
@@ -403,12 +410,15 @@ def load_browser_profile() -> bool:
         saved_affiliation = ""
         saved_instrument_id = None
         saved_instrument_order = []
+        access_authorized = False
 
     st.session_state["screen_width"] = screen_width
     st.session_state["saved_name"] = saved_name
     st.session_state["saved_affiliation"] = saved_affiliation
     st.session_state["saved_instrument_id"] = saved_instrument_id
     st.session_state["saved_instrument_order"] = saved_instrument_order
+    st.session_state["access_authorized"] = access_authorized
+    st.session_state["access_state_loaded"] = True
     st.session_state["browser_profile_loaded"] = True
     return True
 
@@ -458,6 +468,22 @@ def queue_instrument_order_reset() -> None:
 
     st.session_state["pending_browser_action"] = {
         "action": "reset_order",
+        "token": secrets.token_hex(8),
+    }
+
+
+def queue_access_authorization_save() -> None:
+    st.session_state["access_authorized"] = True
+    st.session_state["pending_browser_action"] = {
+        "action": "authorize_access",
+        "token": secrets.token_hex(8),
+    }
+
+
+def queue_access_authorization_clear() -> None:
+    st.session_state["access_authorized"] = False
+    st.session_state["pending_browser_action"] = {
+        "action": "clear_access",
         "token": secrets.token_hex(8),
     }
 
@@ -521,6 +547,23 @@ def flush_pending_browser_action() -> bool:
         "order_reset";
         """
 
+    elif action == "authorize_access":
+        script = """
+        localStorage.setItem(
+            "equipment_booking_access_authorized",
+            "authorized"
+        );
+        "access_authorized";
+        """
+
+    elif action == "clear_access":
+        script = """
+        localStorage.removeItem(
+            "equipment_booking_access_authorized"
+        );
+        "access_cleared";
+        """
+
     else:
         st.session_state["pending_browser_action"] = None
         return True
@@ -579,6 +622,48 @@ def flush_scroll_top() -> None:
 
 def is_mobile_device() -> bool:
     return st.session_state["screen_width"] < MOBILE_BREAKPOINT
+
+
+# ============================================================
+# App access gate
+# ============================================================
+
+def render_access_gate() -> bool:
+    if st.session_state.get("access_authorized"):
+        return True
+
+    st.title(APP_TITLE)
+    st.subheader("利用者認証")
+
+    st.info(
+        "このシステムの利用にはアクセスコードが必要です。"
+    )
+
+    with st.form("app_access_code_form"):
+        access_code = st.text_input(
+            "アクセスコード",
+            type="password",
+            autocomplete="off",
+        )
+        submitted = st.form_submit_button(
+            "利用開始",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if hmac.compare_digest(
+            access_code,
+            APP_ACCESS_CODE,
+        ):
+            queue_access_authorization_save()
+            st.rerun()
+        else:
+            st.error(
+                "アクセスコードが正しくありません。"
+            )
+
+    return False
 
 
 # ============================================================
@@ -3609,6 +3694,9 @@ def main() -> None:
 
     flush_scroll_top()
 
+    if not render_access_gate():
+        return
+
     st.title(APP_TITLE)
 
     page = st.sidebar.radio(
@@ -3618,6 +3706,19 @@ def main() -> None:
             "管理者",
         ],
     )
+
+    with st.sidebar.expander("利用端末の認証"):
+        st.caption(
+            "この端末に保存された利用認証を解除します。"
+        )
+
+        if st.button(
+            "利用認証を解除",
+            use_container_width=True,
+            key="clear_access_authorization",
+        ):
+            queue_access_authorization_clear()
+            st.rerun()
 
     if page == "管理者":
         page_management()
