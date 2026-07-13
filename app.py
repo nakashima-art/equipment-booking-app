@@ -3496,184 +3496,96 @@ def render_mobile_instrument_selector(
 
     st.markdown("### 機器")
 
-    instrument_map = {
-        instrument["name"]: instrument["id"]
-        for instrument in instruments
+    items: list[str] = []
+
+    for instrument in instruments:
+        instrument_id = instrument["id"]
+        instrument_name = html.escape(
+            instrument["name"]
+        )
+
+        is_selected = (
+            instrument_id
+            == current_instrument_id
+        )
+
+        circle_class = (
+            "mobile-machine-dot selected"
+            if is_selected
+            else "mobile-machine-dot"
+        )
+
+        label_class = (
+            "mobile-machine-link selected"
+            if is_selected
+            else "mobile-machine-link"
+        )
+
+        href = (
+            f"?instrument_id={instrument_id}"
+            "#app-top"
+        )
+
+        items.append(
+            f'<a class="{label_class}" '
+            f'href="{href}" target="_self">'
+            f'<span class="{circle_class}"></span>'
+            f'<span>{instrument_name}</span>'
+            f'</a>'
+        )
+
+    selector_html = """
+    <style>
+    .mobile-machine-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin: 0.35rem 0 1.2rem 0;
     }
 
-    instrument_names = list(instrument_map.keys())
+    .mobile-machine-link {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: inherit;
+        text-decoration: none;
+        font-size: 1rem;
+        line-height: 1.35;
+        padding: 2px 0;
+        -webkit-tap-highlight-color: transparent;
+    }
 
-    current_name = next(
-        instrument["name"]
-        for instrument in instruments
-        if instrument["id"] == current_instrument_id
+    .mobile-machine-link:visited {
+        color: inherit;
+    }
+
+    .mobile-machine-dot {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 20px;
+        border-radius: 50%;
+        border: 2px solid #d1d5db;
+        background: white;
+        box-sizing: border-box;
+    }
+
+    .mobile-machine-dot.selected {
+        border: 6px solid #ef5b57;
+    }
+
+    .mobile-machine-link.selected {
+        font-weight: 500;
+    }
+    </style>
+    <div class="mobile-machine-selector">
+    """ + "".join(items) + "</div>"
+
+    st.markdown(
+        selector_html,
+        unsafe_allow_html=True,
     )
-
-    selected_name = st.radio(
-        "機器",
-        instrument_names,
-        index=instrument_names.index(current_name),
-        key=f"mobile_instrument_selector_{current_instrument_id}",
-        label_visibility="collapsed",
-    )
-
-    selected_id = instrument_map[selected_name]
-
-    if selected_id != current_instrument_id:
-        change_instrument(selected_id)
 
     st.divider()
-
-
-def render_sidebar_instrument_order_settings(
-    instruments: list[sqlite3.Row],
-) -> None:
-    with st.sidebar.expander(
-        "機器表示順"
-    ):
-        st.caption(
-            "このブラウザでの機器表示順を変更できます。"
-        )
-
-        default_order = [
-            instrument["id"]
-            for instrument in instruments
-        ]
-
-        normalized_saved_order = (
-            normalize_instrument_order(
-                instruments
-            )
-        )
-
-        draft_key = "instrument_order_draft"
-
-        draft_order = st.session_state.get(
-            draft_key
-        )
-
-        if (
-            not isinstance(
-                draft_order,
-                list,
-            )
-            or set(draft_order)
-            != set(default_order)
-            or len(draft_order)
-            != len(default_order)
-        ):
-            st.session_state[
-                draft_key
-            ] = normalized_saved_order.copy()
-
-        instrument_by_id = {
-            instrument["id"]: instrument
-            for instrument in instruments
-        }
-
-        current_order = st.session_state[
-            draft_key
-        ].copy()
-
-        for index, instrument_id in enumerate(
-            current_order
-        ):
-            instrument = instrument_by_id[
-                instrument_id
-            ]
-
-            col_name, col_up, col_down = st.columns(
-                [5, 1, 1]
-            )
-
-            with col_name:
-                st.write(
-                    instrument["name"]
-                )
-
-            with col_up:
-                if st.button(
-                    "↑",
-                    disabled=index == 0,
-                    key=(
-                        "sidebar_instrument_order_up_"
-                        f"{instrument_id}"
-                    ),
-                    help="上へ移動",
-                    use_container_width=True,
-                ):
-                    current_order[
-                        index - 1
-                    ], current_order[
-                        index
-                    ] = (
-                        current_order[index],
-                        current_order[index - 1],
-                    )
-
-                    st.session_state[
-                        draft_key
-                    ] = current_order
-
-                    st.rerun()
-
-            with col_down:
-                if st.button(
-                    "↓",
-                    disabled=(
-                        index
-                        == len(
-                            current_order
-                        ) - 1
-                    ),
-                    key=(
-                        "sidebar_instrument_order_down_"
-                        f"{instrument_id}"
-                    ),
-                    help="下へ移動",
-                    use_container_width=True,
-                ):
-                    current_order[
-                        index + 1
-                    ], current_order[
-                        index
-                    ] = (
-                        current_order[index],
-                        current_order[index + 1],
-                    )
-
-                    st.session_state[
-                        draft_key
-                    ] = current_order
-
-                    st.rerun()
-
-        if st.button(
-            "表示順を保存",
-            type="primary",
-            use_container_width=True,
-            key="sidebar_save_instrument_order",
-        ):
-            queue_instrument_order_save(
-                st.session_state[
-                    draft_key
-                ]
-            )
-
-            st.rerun()
-
-        if st.button(
-            "初期順に戻す",
-            use_container_width=True,
-            key="sidebar_reset_instrument_order",
-        ):
-            st.session_state[
-                draft_key
-            ] = default_order.copy()
-
-            queue_instrument_order_reset()
-
-            st.rerun()
 
 
 # ============================================================
@@ -3696,6 +3608,11 @@ def main() -> None:
 
     if not render_access_gate():
         return
+
+    st.markdown(
+        '<div id="app-top"></div>',
+        unsafe_allow_html=True,
+    )
 
     st.title(APP_TITLE)
 
