@@ -1,14 +1,18 @@
 import hashlib
 import hmac
+import html
 import json
 import secrets
 import sqlite3
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-import pandas as pd
 import streamlit as st
 
+
+# ============================================================
+# Basic settings
+# ============================================================
 
 APP_TITLE = "実験機器 使用予約システム"
 DB_PATH = "equipment_booking.db"
@@ -28,7 +32,10 @@ st.set_page_config(
 # ============================================================
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(
+        DB_PATH,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -63,9 +70,11 @@ def init_db() -> None:
                 manager_id INTEGER NOT NULL,
                 UNIQUE(instrument_id, manager_id),
                 FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE,
+                    REFERENCES instruments(id)
+                    ON DELETE CASCADE,
                 FOREIGN KEY (manager_id)
-                    REFERENCES manager_accounts(id) ON DELETE CASCADE
+                    REFERENCES manager_accounts(id)
+                    ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS custom_fields (
@@ -79,7 +88,8 @@ def init_db() -> None:
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
+                    REFERENCES instruments(id)
+                    ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS reservations (
@@ -96,7 +106,8 @@ def init_db() -> None:
                 pin_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
+                    REFERENCES instruments(id)
+                    ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS reservation_field_values (
@@ -107,9 +118,11 @@ def init_db() -> None:
                 field_type_snapshot TEXT NOT NULL,
                 value_json TEXT NOT NULL,
                 FOREIGN KEY (reservation_id)
-                    REFERENCES reservations(id) ON DELETE CASCADE,
+                    REFERENCES reservations(id)
+                    ON DELETE CASCADE,
                 FOREIGN KEY (custom_field_id)
-                    REFERENCES custom_fields(id) ON DELETE SET NULL
+                    REFERENCES custom_fields(id)
+                    ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS blocked_periods (
@@ -121,17 +134,22 @@ def init_db() -> None:
                 reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
+                    REFERENCES instruments(id)
+                    ON DELETE CASCADE
             );
             """
         )
 
 
 # ============================================================
-# Security helpers
+# Security
 # ============================================================
 
-def make_hash(value: str, salt_hex: str | None = None) -> tuple[str, str]:
+def make_hash(
+    value: str,
+    salt_hex: str | None = None,
+) -> tuple[str, str]:
+
     if salt_hex is None:
         salt = secrets.token_bytes(16)
         salt_hex = salt.hex()
@@ -153,10 +171,14 @@ def verify_hash(
     salt_hex: str,
     stored_hash: str,
 ) -> bool:
-    _, calculated = make_hash(value, salt_hex)
+
+    _, calculated_hash = make_hash(
+        value,
+        salt_hex,
+    )
 
     return hmac.compare_digest(
-        calculated,
+        calculated_hash,
         stored_hash,
     )
 
@@ -166,18 +188,17 @@ def verify_hash(
 # ============================================================
 
 def generate_time_options() -> list[str]:
+    result = []
+
     current = datetime.combine(
         date.today(),
         time(0, 0),
     )
 
-    result: list[str] = []
-
     for _ in range(96):
         result.append(
             current.strftime("%H:%M")
         )
-
         current += timedelta(minutes=15)
 
     return result
@@ -201,10 +222,37 @@ def overlaps(
     start_b: str,
     end_b: str,
 ) -> bool:
+
     return (
         to_minutes(start_a) < to_minutes(end_b)
         and
         to_minutes(end_a) > to_minutes(start_b)
+    )
+
+
+def get_week_start(target_date: date) -> date:
+    return target_date - timedelta(
+        days=target_date.weekday()
+    )
+
+
+def format_japanese_date(
+    target_date: date,
+) -> str:
+
+    weekday_names = [
+        "月",
+        "火",
+        "水",
+        "木",
+        "金",
+        "土",
+        "日",
+    ]
+
+    return (
+        f"{target_date.month}/{target_date.day}"
+        f"（{weekday_names[target_date.weekday()]}）"
     )
 
 
@@ -306,6 +354,37 @@ def get_reservations(
         ).fetchall()
 
 
+def get_reservations_between(
+    instrument_id: int,
+    start_date: date,
+    end_date: date,
+) -> list[sqlite3.Row]:
+
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT
+                r.*,
+                i.name AS instrument_name
+            FROM reservations r
+            JOIN instruments i
+                ON i.id = r.instrument_id
+            WHERE
+                r.instrument_id = ?
+                AND r.reservation_date >= ?
+                AND r.reservation_date <= ?
+            ORDER BY
+                r.reservation_date,
+                r.start_time
+            """,
+            (
+                instrument_id,
+                start_date.isoformat(),
+                end_date.isoformat(),
+            ),
+        ).fetchall()
+
+
 def get_blocked_periods(
     instrument_id: int,
     target_date: date | None = None,
@@ -340,6 +419,33 @@ def get_blocked_periods(
         return conn.execute(
             query,
             params,
+        ).fetchall()
+
+
+def get_blocked_periods_between(
+    instrument_id: int,
+    start_date: date,
+    end_date: date,
+) -> list[sqlite3.Row]:
+
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM blocked_periods
+            WHERE
+                instrument_id = ?
+                AND reservation_date >= ?
+                AND reservation_date <= ?
+            ORDER BY
+                reservation_date,
+                start_time
+            """,
+            (
+                instrument_id,
+                start_date.isoformat(),
+                end_date.isoformat(),
+            ),
         ).fetchall()
 
 
@@ -381,18 +487,14 @@ def reservation_has_conflict(
             blocked["start_time"],
             blocked["end_time"],
         ):
-            reason = blocked[
-                "reason"
-            ].strip()
 
             message = (
-                "指定した時間帯は"
-                "使用停止期間です。"
+                "指定した時間帯は使用停止期間です。"
             )
 
-            if reason:
+            if blocked["reason"].strip():
                 message += (
-                    f" 理由：{reason}"
+                    f" 理由：{blocked['reason']}"
                 )
 
             return True, message
@@ -413,14 +515,11 @@ def add_reservation(
     custom_values: dict[int, Any],
 ) -> None:
 
-    pin_salt, pin_hash = make_hash(
-        pin
-    )
+    pin_salt, pin_hash = make_hash(pin)
 
     fields = {
         field["id"]: field
-        for field
-        in get_custom_fields(
+        for field in get_custom_fields(
             instrument_id
         )
     }
@@ -441,10 +540,7 @@ def add_reservation(
                 pin_salt,
                 pin_hash
             )
-            VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?
-            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 instrument_id,
@@ -460,35 +556,25 @@ def add_reservation(
             ),
         )
 
-        reservation_id = (
-            cursor.lastrowid
-        )
+        reservation_id = cursor.lastrowid
 
-        for (
-            field_id,
-            value,
-        ) in custom_values.items():
+        for field_id, value in custom_values.items():
 
-            field = fields.get(
-                field_id
-            )
+            field = fields.get(field_id)
 
             if field is None:
                 continue
 
             conn.execute(
                 """
-                INSERT INTO
-                reservation_field_values (
+                INSERT INTO reservation_field_values (
                     reservation_id,
                     custom_field_id,
                     field_name_snapshot,
                     field_type_snapshot,
                     value_json
                 )
-                VALUES (
-                    ?, ?, ?, ?, ?
-                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     reservation_id,
@@ -553,7 +639,7 @@ def get_reservation_field_values(
 
 
 # ============================================================
-# Login / authorization
+# Login
 # ============================================================
 
 def init_session() -> None:
@@ -586,25 +672,11 @@ def init_session() -> None:
 
 def logout() -> None:
 
-    st.session_state[
-        "logged_in"
-    ] = False
-
-    st.session_state[
-        "role"
-    ] = None
-
-    st.session_state[
-        "manager_id"
-    ] = None
-
-    st.session_state[
-        "username"
-    ] = None
-
-    st.session_state[
-        "display_name"
-    ] = None
+    st.session_state["logged_in"] = False
+    st.session_state["role"] = None
+    st.session_state["manager_id"] = None
+    st.session_state["username"] = None
+    st.session_state["display_name"] = None
 
     st.rerun()
 
@@ -617,32 +689,16 @@ def authenticate(
     username = username.strip()
 
     if (
-        username
-        == SYSTEM_ADMIN_USERNAME
+        username == SYSTEM_ADMIN_USERNAME
         and
-        password
-        == SYSTEM_ADMIN_PASSWORD
+        password == SYSTEM_ADMIN_PASSWORD
     ):
 
-        st.session_state[
-            "logged_in"
-        ] = True
-
-        st.session_state[
-            "role"
-        ] = "system_admin"
-
-        st.session_state[
-            "manager_id"
-        ] = None
-
-        st.session_state[
-            "username"
-        ] = username
-
-        st.session_state[
-            "display_name"
-        ] = "システム管理者"
+        st.session_state["logged_in"] = True
+        st.session_state["role"] = "system_admin"
+        st.session_state["manager_id"] = None
+        st.session_state["username"] = username
+        st.session_state["display_name"] = "システム管理者"
 
         return True
 
@@ -669,25 +725,11 @@ def authenticate(
     ):
         return False
 
-    st.session_state[
-        "logged_in"
-    ] = True
-
-    st.session_state[
-        "role"
-    ] = "instrument_manager"
-
-    st.session_state[
-        "manager_id"
-    ] = account["id"]
-
-    st.session_state[
-        "username"
-    ] = account["username"]
-
-    st.session_state[
-        "display_name"
-    ] = account["display_name"]
+    st.session_state["logged_in"] = True
+    st.session_state["role"] = "instrument_manager"
+    st.session_state["manager_id"] = account["id"]
+    st.session_state["username"] = account["username"]
+    st.session_state["display_name"] = account["display_name"]
 
     return True
 
@@ -721,18 +763,15 @@ def manageable_instrument_ids() -> list[int]:
     ):
 
         return [
-            row["id"]
-            for row
-            in get_instruments(
+            instrument["id"]
+            for instrument in get_instruments(
                 active_only=False
             )
         ]
 
-    manager_id = (
-        st.session_state[
-            "manager_id"
-        ]
-    )
+    manager_id = st.session_state[
+        "manager_id"
+    ]
 
     if manager_id is None:
         return []
@@ -766,106 +805,24 @@ def purpose_label(
     return row["purpose"]
 
 
-def make_schedule_dataframe(
-    reservations: list[sqlite3.Row],
-    blocked_periods: list[sqlite3.Row],
-) -> pd.DataFrame:
-
-    rows: list[
-        dict[str, str]
-    ] = []
-
-    for reservation in reservations:
-
-        rows.append(
-            {
-                "開始":
-                    reservation["start_time"],
-                "終了":
-                    reservation["end_time"],
-                "予約者":
-                    reservation["user_name"],
-                "所属":
-                    reservation["affiliation"],
-                "使用目的":
-                    purpose_label(
-                        reservation
-                    ),
-                "状態":
-                    "予約",
-            }
-        )
-
-    for blocked in blocked_periods:
-
-        rows.append(
-            {
-                "開始":
-                    blocked["start_time"],
-                "終了":
-                    blocked["end_time"],
-                "予約者":
-                    "",
-                "所属":
-                    "",
-                "使用目的":
-                    blocked["reason"],
-                "状態":
-                    "使用停止",
-            }
-        )
-
-    if not rows:
-
-        return pd.DataFrame(
-            columns=[
-                "開始",
-                "終了",
-                "予約者",
-                "所属",
-                "使用目的",
-                "状態",
-            ]
-        )
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values(
-            [
-                "開始",
-                "終了",
-            ]
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-
 def render_custom_field(
     field: sqlite3.Row,
     key_prefix: str,
 ) -> Any:
 
-    label = field[
-        "field_name"
-    ]
+    label = field["field_name"]
 
     if field["required"]:
         label += " *"
 
     key = (
-        f"{key_prefix}_"
-        f"{field['id']}"
+        f"{key_prefix}_{field['id']}"
     )
 
-    field_type = field[
-        "field_type"
-    ]
+    field_type = field["field_type"]
 
     options = json.loads(
-        field["options_json"]
-        or "[]"
+        field["options_json"] or "[]"
     )
 
     if field_type == "text":
@@ -888,15 +845,11 @@ def render_custom_field(
             label,
             [
                 "選択してください"
-            ]
-            + options,
+            ] + options,
             key=key,
         )
 
-        if (
-            selected
-            == "選択してください"
-        ):
+        if selected == "選択してください":
             return ""
 
         return selected
@@ -936,30 +889,449 @@ def custom_value_is_empty(
     value: Any,
 ) -> bool:
 
-    if (
-        field["field_type"]
-        == "checkbox"
-    ):
+    if field["field_type"] == "checkbox":
         return value is False
 
-    if (
-        field["field_type"]
-        == "multiselect"
-    ):
+    if field["field_type"] == "multiselect":
         return len(value) == 0
 
     if value is None:
         return True
 
-    if isinstance(
-        value,
-        str,
-    ):
-        return (
-            value.strip() == ""
-        )
+    if isinstance(value, str):
+        return value.strip() == ""
 
     return False
+
+
+# ============================================================
+# Calendar
+# ============================================================
+
+CALENDAR_START_HOUR = 6
+CALENDAR_END_HOUR = 24
+SLOT_HEIGHT = 28
+
+
+def calendar_times() -> list[str]:
+
+    result = []
+
+    current = datetime.combine(
+        date.today(),
+        time(
+            CALENDAR_START_HOUR,
+            0,
+        ),
+    )
+
+    end = datetime.combine(
+        date.today(),
+        time(23, 45),
+    )
+
+    while current <= end:
+
+        result.append(
+            current.strftime("%H:%M")
+        )
+
+        current += timedelta(minutes=15)
+
+    return result
+
+
+CALENDAR_TIMES = calendar_times()
+
+
+def get_calendar_item_for_slot(
+    reservations: list[sqlite3.Row],
+    blocked_periods: list[sqlite3.Row],
+    target_date: date,
+    slot_time: str,
+) -> tuple[str, sqlite3.Row] | None:
+
+    target_date_text = (
+        target_date.isoformat()
+    )
+
+    slot_minutes = to_minutes(
+        slot_time
+    )
+
+    for reservation in reservations:
+
+        if (
+            reservation["reservation_date"]
+            != target_date_text
+        ):
+            continue
+
+        start = to_minutes(
+            reservation["start_time"]
+        )
+
+        end = to_minutes(
+            reservation["end_time"]
+        )
+
+        if (
+            start
+            <= slot_minutes
+            < end
+        ):
+            return (
+                "reservation",
+                reservation,
+            )
+
+    for blocked in blocked_periods:
+
+        if (
+            blocked["reservation_date"]
+            != target_date_text
+        ):
+            continue
+
+        start = to_minutes(
+            blocked["start_time"]
+        )
+
+        end = to_minutes(
+            blocked["end_time"]
+        )
+
+        if (
+            start
+            <= slot_minutes
+            < end
+        ):
+            return (
+                "blocked",
+                blocked,
+            )
+
+    return None
+
+
+def build_calendar_html(
+    dates: list[date],
+    reservations: list[sqlite3.Row],
+    blocked_periods: list[sqlite3.Row],
+) -> str:
+
+    column_count = len(dates)
+
+    minimum_width = (
+        110
+        + column_count * 170
+    )
+
+    css = f"""
+    <style>
+    .booking-scroll {{
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: visible;
+        border: 1px solid #d9d9d9;
+        border-radius: 8px;
+        background: white;
+    }}
+
+    .booking-calendar {{
+        min-width: {minimum_width}px;
+        display: grid;
+        grid-template-columns:
+            90px repeat({column_count}, minmax(160px, 1fr));
+        font-family:
+            -apple-system,
+            BlinkMacSystemFont,
+            "Segoe UI",
+            sans-serif;
+        font-size: 13px;
+    }}
+
+    .calendar-header {{
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        padding: 10px 4px;
+        text-align: center;
+        font-weight: 600;
+        border-right: 1px solid #d9d9d9;
+        border-bottom: 1px solid #bdbdbd;
+        background: #f7f7f7;
+    }}
+
+    .calendar-time {{
+        min-height: {SLOT_HEIGHT}px;
+        box-sizing: border-box;
+        padding: 3px 8px;
+        text-align: right;
+        color: #666;
+        border-right: 1px solid #d9d9d9;
+        border-bottom: 1px solid #eeeeee;
+        background: #fafafa;
+        font-size: 11px;
+    }}
+
+    .calendar-cell {{
+        min-height: {SLOT_HEIGHT}px;
+        box-sizing: border-box;
+        border-right: 1px solid #e0e0e0;
+        border-bottom: 1px solid #eeeeee;
+        padding: 2px;
+    }}
+
+    .calendar-cell-hour {{
+        border-top: 1px solid #c9c9c9;
+    }}
+
+    .reservation-block {{
+        height: 100%;
+        min-height: 23px;
+        box-sizing: border-box;
+        border-radius: 4px;
+        padding: 3px 5px;
+        background: #dbeafe;
+        border-left: 4px solid #2563eb;
+        color: #1f2937;
+        overflow: hidden;
+        line-height: 1.25;
+    }}
+
+    .blocked-block {{
+        height: 100%;
+        min-height: 23px;
+        box-sizing: border-box;
+        border-radius: 4px;
+        padding: 3px 5px;
+        background: #f3f4f6;
+        border-left: 4px solid #6b7280;
+        color: #374151;
+        overflow: hidden;
+        line-height: 1.25;
+    }}
+
+    .calendar-name {{
+        font-weight: 600;
+    }}
+
+    .calendar-small {{
+        font-size: 11px;
+    }}
+    </style>
+    """
+
+    content = [
+        css,
+        '<div class="booking-scroll">',
+        '<div class="booking-calendar">',
+    ]
+
+    content.append(
+        '<div class="calendar-header">時刻</div>'
+    )
+
+    for target_date in dates:
+
+        date_label = html.escape(
+            format_japanese_date(
+                target_date
+            )
+        )
+
+        content.append(
+            f'<div class="calendar-header">'
+            f'{date_label}'
+            f'</div>'
+        )
+
+    for slot_time in CALENDAR_TIMES:
+
+        minute = int(
+            slot_time.split(":")[1]
+        )
+
+        time_label = (
+            slot_time
+            if minute in {0, 30}
+            else ""
+        )
+
+        content.append(
+            f'<div class="calendar-time">'
+            f'{html.escape(time_label)}'
+            f'</div>'
+        )
+
+        for target_date in dates:
+
+            item = get_calendar_item_for_slot(
+                reservations,
+                blocked_periods,
+                target_date,
+                slot_time,
+            )
+
+            extra_class = (
+                " calendar-cell-hour"
+                if minute == 0
+                else ""
+            )
+
+            if item is None:
+
+                content.append(
+                    f'<div class="calendar-cell'
+                    f'{extra_class}"></div>'
+                )
+
+                continue
+
+            item_type, row = item
+
+            is_start = (
+                row["start_time"]
+                == slot_time
+            )
+
+            if not is_start:
+
+                content.append(
+                    f'<div class="calendar-cell'
+                    f'{extra_class}"></div>'
+                )
+
+                continue
+
+            duration_minutes = (
+                to_minutes(row["end_time"])
+                - to_minutes(row["start_time"])
+            )
+
+            slot_count = max(
+                1,
+                duration_minutes // 15,
+            )
+
+            block_height = (
+                SLOT_HEIGHT * slot_count
+                - 4
+            )
+
+            if item_type == "reservation":
+
+                name = html.escape(
+                    row["user_name"]
+                )
+
+                purpose = html.escape(
+                    purpose_label(row)
+                )
+
+                affiliation = html.escape(
+                    row["affiliation"]
+                )
+
+                time_text = html.escape(
+                    f"{row['start_time']}–"
+                    f"{row['end_time']}"
+                )
+
+                block_html = f"""
+                <div
+                    class="reservation-block"
+                    style="
+                        height:{block_height}px;
+                        position:relative;
+                        z-index:2;
+                    "
+                >
+                    <div class="calendar-name">
+                        {name}
+                    </div>
+                    <div class="calendar-small">
+                        {purpose}
+                    </div>
+                    <div class="calendar-small">
+                        {time_text}
+                    </div>
+                    <div class="calendar-small">
+                        {affiliation}
+                    </div>
+                </div>
+                """
+
+            else:
+
+                reason = html.escape(
+                    row["reason"]
+                    or "使用停止"
+                )
+
+                time_text = html.escape(
+                    f"{row['start_time']}–"
+                    f"{row['end_time']}"
+                )
+
+                block_html = f"""
+                <div
+                    class="blocked-block"
+                    style="
+                        height:{block_height}px;
+                        position:relative;
+                        z-index:2;
+                    "
+                >
+                    <div class="calendar-name">
+                        使用停止
+                    </div>
+                    <div class="calendar-small">
+                        {reason}
+                    </div>
+                    <div class="calendar-small">
+                        {time_text}
+                    </div>
+                </div>
+                """
+
+            content.append(
+                f'<div class="calendar-cell'
+                f'{extra_class}">'
+                f'{block_html}'
+                f'</div>'
+            )
+
+    content.append("</div>")
+    content.append("</div>")
+
+    return "".join(content)
+
+
+def render_calendar(
+    dates: list[date],
+    reservations: list[sqlite3.Row],
+    blocked_periods: list[sqlite3.Row],
+) -> None:
+
+    calendar_html = build_calendar_html(
+        dates,
+        reservations,
+        blocked_periods,
+    )
+
+    calendar_height = (
+        len(CALENDAR_TIMES)
+        * SLOT_HEIGHT
+        + 80
+    )
+
+    st.components.v1.html(
+        calendar_html,
+        height=calendar_height,
+        scrolling=False,
+    )
 
 
 # ============================================================
@@ -984,11 +1356,14 @@ def page_schedule() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(
+        [2, 1, 1]
+    )
 
     with col1:
 
@@ -1001,17 +1376,26 @@ def page_schedule() -> None:
 
     with col2:
 
+        view_mode = st.radio(
+            "表示",
+            [
+                "週間",
+                "1日",
+            ],
+            horizontal=True,
+        )
+
+    with col3:
+
         selected_date = st.date_input(
-            "使用日",
+            "日付",
             value=date.today(),
             format="YYYY/MM/DD",
         )
 
-    instrument_id = (
-        instrument_map[
-            selected_name
-        ]
-    )
+    instrument_id = instrument_map[
+        selected_name
+    ]
 
     instrument = get_instrument(
         instrument_id
@@ -1020,39 +1404,69 @@ def page_schedule() -> None:
     if (
         instrument
         and
-        instrument[
-            "notice"
-        ].strip()
+        instrument["notice"].strip()
     ):
 
         st.info(
             instrument["notice"]
         )
 
-    df = make_schedule_dataframe(
-        get_reservations(
-            instrument_id,
-            selected_date,
-        ),
-        get_blocked_periods(
-            instrument_id,
-            selected_date,
-        ),
-    )
+    if view_mode == "週間":
 
-    if df.empty:
+        week_start = get_week_start(
+            selected_date
+        )
 
-        st.success(
-            "この日の予約はありません。"
+        dates = [
+            week_start
+            + timedelta(days=i)
+            for i in range(7)
+        ]
+
+        week_end = dates[-1]
+
+        st.caption(
+            f"{week_start.strftime('%Y年%m月%d日')} ～ "
+            f"{week_end.strftime('%Y年%m月%d日')}"
+        )
+
+        reservations = get_reservations_between(
+            instrument_id,
+            week_start,
+            week_end,
+        )
+
+        blocked_periods = (
+            get_blocked_periods_between(
+                instrument_id,
+                week_start,
+                week_end,
+            )
         )
 
     else:
 
-        st.dataframe(
-            df,
-            hide_index=True,
-            use_container_width=True,
+        dates = [
+            selected_date
+        ]
+
+        reservations = get_reservations(
+            instrument_id,
+            selected_date,
         )
+
+        blocked_periods = (
+            get_blocked_periods(
+                instrument_id,
+                selected_date,
+            )
+        )
+
+    render_calendar(
+        dates,
+        reservations,
+        blocked_periods,
+    )
 
 
 def page_new_reservation() -> None:
@@ -1073,8 +1487,9 @@ def page_new_reservation() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     selected_name = st.selectbox(
@@ -1084,11 +1499,9 @@ def page_new_reservation() -> None:
         ),
     )
 
-    instrument_id = (
-        instrument_map[
-            selected_name
-        ]
-    )
+    instrument_id = instrument_map[
+        selected_name
+    ]
 
     instrument = get_instrument(
         instrument_id
@@ -1101,9 +1514,7 @@ def page_new_reservation() -> None:
         ].strip():
 
             st.caption(
-                instrument[
-                    "description"
-                ]
+                instrument["description"]
             )
 
         if instrument[
@@ -1119,8 +1530,7 @@ def page_new_reservation() -> None:
     )
 
     with st.form(
-        f"reservation_form_"
-        f"{instrument_id}"
+        f"reservation_form_{instrument_id}"
     ):
 
         user_name = st.text_input(
@@ -1131,13 +1541,11 @@ def page_new_reservation() -> None:
             "所属 *"
         )
 
-        reservation_date = (
-            st.date_input(
-                "使用日 *",
-                value=date.today(),
-                min_value=date.today(),
-                format="YYYY/MM/DD",
-            )
+        reservation_date = st.date_input(
+            "使用日 *",
+            value=date.today(),
+            min_value=date.today(),
+            format="YYYY/MM/DD",
         )
 
         col1, col2 = st.columns(2)
@@ -1171,10 +1579,8 @@ def page_new_reservation() -> None:
 
         if purpose == "その他":
 
-            purpose_other = (
-                st.text_input(
-                    "「その他」の内容 *"
-                )
+            purpose_other = st.text_input(
+                "「その他」の内容 *"
             )
 
         custom_values: dict[
@@ -1194,10 +1600,7 @@ def page_new_reservation() -> None:
                     field["id"]
                 ] = render_custom_field(
                     field,
-                    (
-                        f"reservation_"
-                        f"{instrument_id}"
-                    ),
+                    f"reservation_{instrument_id}",
                 )
 
         pin = st.text_input(
@@ -1210,12 +1613,10 @@ def page_new_reservation() -> None:
             ),
         )
 
-        submitted = (
-            st.form_submit_button(
-                "予約する",
-                type="primary",
-                use_container_width=True,
-            )
+        submitted = st.form_submit_button(
+            "予約する",
+            type="primary",
+            use_container_width=True,
         )
 
     if not submitted:
@@ -1270,14 +1671,16 @@ def page_new_reservation() -> None:
 
     for field in fields:
 
+        value = custom_values[
+            field["id"]
+        ]
+
         if (
             field["required"]
             and
             custom_value_is_empty(
                 field,
-                custom_values[
-                    field["id"]
-                ],
+                value,
             )
         ):
 
@@ -1324,8 +1727,7 @@ def page_new_reservation() -> None:
     st.success(
         f"{selected_name}を "
         f"{reservation_date.strftime('%Y年%m月%d日')} "
-        f"{start_time}〜{end_time} "
-        "で予約しました。"
+        f"{start_time}〜{end_time}で予約しました。"
     )
 
 
@@ -1347,8 +1749,9 @@ def page_cancel_reservation() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     col1, col2 = st.columns(2)
@@ -1373,9 +1776,7 @@ def page_cancel_reservation() -> None:
         )
 
     reservations = get_reservations(
-        instrument_map[
-            selected_name
-        ],
+        instrument_map[selected_name],
         selected_date,
     )
 
@@ -1387,23 +1788,20 @@ def page_cancel_reservation() -> None:
 
         return
 
-    reservation_map: dict[
-        str,
-        int,
-    ] = {}
+    reservation_map = {}
 
-    for row in reservations:
+    for reservation in reservations:
 
         label = (
-            f"{row['start_time']}"
-            f"〜{row['end_time']} ｜ "
-            f"{row['user_name']} ｜ "
-            f"{row['affiliation']}"
+            f"{reservation['start_time']}"
+            f"〜{reservation['end_time']} ｜ "
+            f"{reservation['user_name']} ｜ "
+            f"{reservation['affiliation']}"
         )
 
         reservation_map[
             label
-        ] = row["id"]
+        ] = reservation["id"]
 
     selected_label = st.selectbox(
         "取り消す予約",
@@ -1413,9 +1811,7 @@ def page_cancel_reservation() -> None:
     )
 
     reservation = get_reservation(
-        reservation_map[
-            selected_label
-        ]
+        reservation_map[selected_label]
     )
 
     if reservation is None:
@@ -1467,7 +1863,7 @@ def page_cancel_reservation() -> None:
 
 
 # ============================================================
-# Admin / manager pages
+# Login page
 # ============================================================
 
 def render_login() -> bool:
@@ -1506,11 +1902,9 @@ def render_login() -> bool:
             type="password",
         )
 
-        submitted = (
-            st.form_submit_button(
-                "ログイン",
-                type="primary",
-            )
+        submitted = st.form_submit_button(
+            "ログイン",
+            type="primary",
         )
 
     if submitted:
@@ -1535,6 +1929,10 @@ def render_login() -> bool:
 
     return False
 
+
+# ============================================================
+# Management
+# ============================================================
 
 def page_management() -> None:
 
@@ -1605,10 +2003,8 @@ def admin_instrument_management() -> None:
             "利用者への注意事項"
         )
 
-        submitted = (
-            st.form_submit_button(
-                "機器を追加"
-            )
+        submitted = st.form_submit_button(
+            "機器を追加"
         )
 
     if submitted:
@@ -1673,24 +2069,18 @@ def admin_instrument_management() -> None:
                 ),
             )
 
-            new_description = (
-                st.text_area(
-                    "説明",
-                    value=instrument[
-                        "description"
-                    ],
-                    key=(
-                        f"instrument_description_"
-                        f"{instrument['id']}"
-                    ),
-                )
+            new_description = st.text_area(
+                "説明",
+                value=instrument["description"],
+                key=(
+                    f"instrument_description_"
+                    f"{instrument['id']}"
+                ),
             )
 
             new_notice = st.text_area(
                 "利用者への注意事項",
-                value=instrument[
-                    "notice"
-                ],
+                value=instrument["notice"],
                 key=(
                     f"instrument_notice_"
                     f"{instrument['id']}"
@@ -1776,10 +2166,8 @@ def admin_manager_management() -> None:
             type="password",
         )
 
-        submitted = (
-            st.form_submit_button(
-                "機器管理者を追加"
-            )
+        submitted = st.form_submit_button(
+            "機器管理者を追加"
         )
 
     if submitted:
@@ -1812,8 +2200,8 @@ def admin_manager_management() -> None:
 
         else:
 
-            salt, password_hash = (
-                make_hash(password)
+            salt, password_hash = make_hash(
+                password
             )
 
             try:
@@ -1839,8 +2227,7 @@ def admin_manager_management() -> None:
                     )
 
                 st.success(
-                    "機器管理者を"
-                    "追加しました。"
+                    "機器管理者を追加しました。"
                 )
 
                 st.rerun()
@@ -1874,45 +2261,40 @@ def admin_manager_management() -> None:
 
         manager_map = {
             (
-                f"{row['display_name']}"
-                f"（{row['username']}）"
+                f"{manager['display_name']}"
+                f"（{manager['username']}）"
             ):
-            row["id"]
-            for row in managers
-            if row["active"]
+            manager["id"]
+            for manager in managers
+            if manager["active"]
         }
 
         instrument_map = {
-            row["name"]: row["id"]
-            for row in instruments
+            instrument["name"]:
+                instrument["id"]
+            for instrument in instruments
         }
 
         with st.form(
             "assign_manager_form"
         ):
 
-            selected_manager = (
-                st.selectbox(
-                    "機器管理者",
-                    list(
-                        manager_map.keys()
-                    ),
-                )
+            selected_manager = st.selectbox(
+                "機器管理者",
+                list(
+                    manager_map.keys()
+                ),
             )
 
-            selected_instrument = (
-                st.selectbox(
-                    "機器",
-                    list(
-                        instrument_map.keys()
-                    ),
-                )
+            selected_instrument = st.selectbox(
+                "機器",
+                list(
+                    instrument_map.keys()
+                ),
             )
 
-            submitted = (
-                st.form_submit_button(
-                    "担当機器を割り当て"
-                )
+            submitted = st.form_submit_button(
+                "担当機器を割り当て"
             )
 
         if submitted:
@@ -1940,8 +2322,7 @@ def admin_manager_management() -> None:
                     )
 
                 st.success(
-                    "担当機器を"
-                    "割り当てました。"
+                    "担当機器を割り当てました。"
                 )
 
                 st.rerun()
@@ -1986,18 +2367,14 @@ def admin_manager_management() -> None:
 
                 for row in assigned:
 
-                    col1, col2 = (
-                        st.columns(
-                            [5, 1]
-                        )
+                    col1, col2 = st.columns(
+                        [5, 1]
                     )
 
                     with col1:
 
                         st.write(
-                            row[
-                                "instrument_name"
-                            ]
+                            row["instrument_name"]
                         )
 
                     with col2:
@@ -2018,9 +2395,7 @@ def admin_manager_management() -> None:
                                     WHERE id = ?
                                     """,
                                     (
-                                        row[
-                                            "assignment_id"
-                                        ],
+                                        row["assignment_id"],
                                     ),
                                 )
 
@@ -2080,10 +2455,8 @@ def admin_manager_management() -> None:
 
                     if new_password:
 
-                        salt, password_hash = (
-                            make_hash(
-                                new_password
-                            )
+                        salt, password_hash = make_hash(
+                            new_password
                         )
 
                         conn.execute(
@@ -2114,15 +2487,20 @@ def manager_instrument_settings() -> None:
         "担当機器設定"
     )
 
-    ids = manageable_instrument_ids()
+    instrument_ids = (
+        manageable_instrument_ids()
+    )
 
     instruments = [
-        row
-        for row in (
-            get_instrument(i)
-            for i in ids
+        instrument
+        for instrument in (
+            get_instrument(
+                instrument_id
+            )
+            for instrument_id
+            in instrument_ids
         )
-        if row is not None
+        if instrument is not None
     ]
 
     if not instruments:
@@ -2134,8 +2512,9 @@ def manager_instrument_settings() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     selected_name = st.selectbox(
@@ -2143,13 +2522,12 @@ def manager_instrument_settings() -> None:
         list(
             instrument_map.keys()
         ),
+        key="manager_setting_instrument",
     )
 
-    instrument_id = (
-        instrument_map[
-            selected_name
-        ]
-    )
+    instrument_id = instrument_map[
+        selected_name
+    ]
 
     instrument = get_instrument(
         instrument_id
@@ -2164,9 +2542,7 @@ def manager_instrument_settings() -> None:
 
     description = st.text_area(
         "機器の説明",
-        value=instrument[
-            "description"
-        ],
+        value=instrument["description"],
         key=(
             f"manager_description_"
             f"{instrument_id}"
@@ -2175,9 +2551,7 @@ def manager_instrument_settings() -> None:
 
     notice = st.text_area(
         "利用者への注意事項",
-        value=instrument[
-            "notice"
-        ],
+        value=instrument["notice"],
         key=(
             f"manager_notice_"
             f"{instrument_id}"
@@ -2252,8 +2626,7 @@ def custom_field_management(
     }
 
     with st.form(
-        f"add_custom_field_"
-        f"{instrument_id}"
+        f"add_custom_field_{instrument_id}"
     ):
 
         field_name = st.text_input(
@@ -2279,10 +2652,8 @@ def custom_field_management(
             ),
         )
 
-        submitted = (
-            st.form_submit_button(
-                "入力項目を追加"
-            )
+        submitted = st.form_submit_button(
+            "入力項目を追加"
         )
 
     if submitted:
@@ -2293,8 +2664,7 @@ def custom_field_management(
 
         options = [
             line.strip()
-            for line
-            in options_text.splitlines()
+            for line in options_text.splitlines()
             if line.strip()
         ]
 
@@ -2466,8 +2836,7 @@ def blocked_period_management(
     )
 
     with st.form(
-        f"blocked_period_form_"
-        f"{instrument_id}"
+        f"blocked_period_form_{instrument_id}"
     ):
 
         blocked_date = st.date_input(
@@ -2506,10 +2875,8 @@ def blocked_period_management(
             "理由"
         )
 
-        submitted = (
-            st.form_submit_button(
-                "使用停止期間を追加"
-            )
+        submitted = st.form_submit_button(
+            "使用停止期間を追加"
         )
 
     if submitted:
@@ -2630,15 +2997,20 @@ def manager_reservation_management() -> None:
         "予約管理"
     )
 
-    ids = manageable_instrument_ids()
+    instrument_ids = (
+        manageable_instrument_ids()
+    )
 
     instruments = [
-        row
-        for row in (
-            get_instrument(i)
-            for i in ids
+        instrument
+        for instrument in (
+            get_instrument(
+                instrument_id
+            )
+            for instrument_id
+            in instrument_ids
         )
-        if row is not None
+        if instrument is not None
     ]
 
     if not instruments:
@@ -2650,8 +3022,9 @@ def manager_reservation_management() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     selected_name = st.selectbox(
@@ -2659,15 +3032,11 @@ def manager_reservation_management() -> None:
         list(
             instrument_map.keys()
         ),
-        key=(
-            "manager_reservation_instrument"
-        ),
+        key="manager_reservation_instrument",
     )
 
     reservations = get_reservations(
-        instrument_map[
-            selected_name
-        ]
+        instrument_map[selected_name]
     )
 
     if not reservations:
@@ -2708,15 +3077,10 @@ def manager_reservation_management() -> None:
             for field_value in field_values:
 
                 value = json.loads(
-                    field_value[
-                        "value_json"
-                    ]
+                    field_value["value_json"]
                 )
 
-                if isinstance(
-                    value,
-                    list,
-                ):
+                if isinstance(value, list):
 
                     display_value = (
                         "、".join(
@@ -2727,10 +3091,7 @@ def manager_reservation_management() -> None:
                         )
                     )
 
-                elif isinstance(
-                    value,
-                    bool,
-                ):
+                elif isinstance(value, bool):
 
                     display_value = (
                         "はい"
@@ -2777,7 +3138,6 @@ def manager_reservation_management() -> None:
 def main() -> None:
 
     init_db()
-
     init_session()
 
     st.title(
