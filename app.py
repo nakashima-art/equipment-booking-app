@@ -115,6 +115,7 @@ def init_db() -> None:
                 instrument_id INTEGER NOT NULL,
                 user_name TEXT NOT NULL,
                 affiliation TEXT NOT NULL,
+                reservation_date TEXT NOT NULL DEFAULT '',
                 start_date TEXT,
                 end_date TEXT,
                 start_time TEXT NOT NULL,
@@ -159,10 +160,6 @@ def init_db() -> None:
             );
             """
         )
-
-        # ----------------------------------------------------
-        # Migration from the earlier reservation schema
-        # ----------------------------------------------------
 
         columns = table_columns(
             conn,
@@ -222,7 +219,7 @@ def init_db() -> None:
 
 
 # ============================================================
-# Security helpers
+# Security
 # ============================================================
 
 def make_hash(
@@ -267,16 +264,16 @@ def verify_hash(
 
 
 # ============================================================
-# Date and time helpers
+# Date and time
 # ============================================================
 
 def generate_time_options() -> list[str]:
-    result = []
-
     current = datetime.combine(
         date.today(),
         time(0, 0),
     )
+
+    result: list[str] = []
 
     for _ in range(96):
         result.append(
@@ -291,6 +288,7 @@ def generate_time_options() -> list[str]:
 
 
 TIME_OPTIONS = generate_time_options()
+CALENDAR_TIMES = TIME_OPTIONS.copy()
 
 
 def to_minutes(
@@ -420,7 +418,7 @@ def intervals_overlap(
 
 
 # ============================================================
-# Browser storage
+# Browser local storage
 # ============================================================
 
 def read_local_storage(
@@ -452,11 +450,11 @@ def write_local_storage(
             f"localStorage.setItem("
             f"{json.dumps(key)}, "
             f"{json.dumps(value)}"
-            f")"
+            f"); true;"
         ),
         key=(
             f"write_{key}_"
-            f"{hash(value)}"
+            f"{hash((key, value))}"
         ),
     )
 
@@ -468,12 +466,15 @@ def clear_local_storage() -> None:
         localStorage.removeItem(
             "equipment_booking_name"
         );
+
         localStorage.removeItem(
             "equipment_booking_affiliation"
         );
+
         localStorage.removeItem(
             "equipment_booking_last_instrument"
         );
+
         true;
         """,
         key="clear_saved_user",
@@ -481,7 +482,7 @@ def clear_local_storage() -> None:
 
 
 # ============================================================
-# Instrument data
+# Instruments
 # ============================================================
 
 def get_instruments(
@@ -581,13 +582,12 @@ def get_reservation_field_value_map(
     reservation_id: int,
 ) -> dict[int, Any]:
 
-    rows = get_reservation_field_values(
+    result: dict[int, Any] = {}
+
+    for row in get_reservation_field_values(
         reservation_id
-    )
+    ):
 
-    result = {}
-
-    for row in rows:
         if row["custom_field_id"] is None:
             continue
 
@@ -598,6 +598,55 @@ def get_reservation_field_value_map(
         )
 
     return result
+
+
+# ============================================================
+# Blocked periods
+# ============================================================
+
+def get_blocked_periods(
+    instrument_id: int,
+) -> list[sqlite3.Row]:
+
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM blocked_periods
+            WHERE instrument_id = ?
+            ORDER BY
+                reservation_date,
+                start_time
+            """,
+            (instrument_id,),
+        ).fetchall()
+
+
+def get_blocked_periods_for_range(
+    instrument_id: int,
+    range_start: date,
+    range_end: date,
+) -> list[sqlite3.Row]:
+
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM blocked_periods
+            WHERE
+                instrument_id = ?
+                AND reservation_date >= ?
+                AND reservation_date <= ?
+            ORDER BY
+                reservation_date,
+                start_time
+            """,
+            (
+                instrument_id,
+                range_start.isoformat(),
+                range_end.isoformat(),
+            ),
+        ).fetchall()
 
 
 # ============================================================
@@ -721,11 +770,9 @@ def reservation_has_conflict(
                 "指定した期間には既に予約があります。",
             )
 
-    blocked_periods = get_blocked_periods(
+    for blocked in get_blocked_periods(
         instrument_id
-    )
-
-    for blocked in blocked_periods:
+    ):
 
         blocked_date = date.fromisoformat(
             blocked["reservation_date"]
@@ -749,8 +796,8 @@ def reservation_has_conflict(
         ):
 
             message = (
-                "指定した期間には使用停止時間が"
-                "含まれています。"
+                "指定した期間には"
+                "使用停止時間が含まれています。"
             )
 
             if blocked["reason"]:
@@ -785,7 +832,10 @@ def save_reservation_field_values(
         )
     }
 
-    for field_id, value in custom_values.items():
+    for (
+        field_id,
+        value,
+    ) in custom_values.items():
 
         field = fields.get(
             field_id
@@ -831,7 +881,7 @@ def add_reservation(
     remarks: str,
     pin: str,
     custom_values: dict[int, Any],
-) -> None:
+) -> int:
 
     pin_salt, pin_hash = make_hash(
         pin
@@ -845,6 +895,7 @@ def add_reservation(
                 instrument_id,
                 user_name,
                 affiliation,
+                reservation_date,
                 start_date,
                 end_date,
                 start_time,
@@ -856,7 +907,7 @@ def add_reservation(
                 pin_hash
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?
             )
             """,
@@ -864,6 +915,7 @@ def add_reservation(
                 instrument_id,
                 user_name.strip(),
                 affiliation.strip(),
+                start_date.isoformat(),
                 start_date.isoformat(),
                 end_date.isoformat(),
                 start_time,
@@ -876,7 +928,9 @@ def add_reservation(
             ),
         )
 
-        reservation_id = cursor.lastrowid
+        reservation_id = int(
+            cursor.lastrowid
+        )
 
         save_reservation_field_values(
             conn,
@@ -884,6 +938,8 @@ def add_reservation(
             instrument_id,
             custom_values,
         )
+
+    return reservation_id
 
 
 def update_reservation(
@@ -919,6 +975,7 @@ def update_reservation(
             SET
                 user_name = ?,
                 affiliation = ?,
+                reservation_date = ?,
                 start_date = ?,
                 end_date = ?,
                 start_time = ?,
@@ -931,6 +988,7 @@ def update_reservation(
             (
                 user_name.strip(),
                 affiliation.strip(),
+                start_date.isoformat(),
                 start_date.isoformat(),
                 end_date.isoformat(),
                 start_time,
@@ -965,55 +1023,6 @@ def delete_reservation(
 
 
 # ============================================================
-# Blocked periods
-# ============================================================
-
-def get_blocked_periods(
-    instrument_id: int,
-) -> list[sqlite3.Row]:
-
-    with get_connection() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM blocked_periods
-            WHERE instrument_id = ?
-            ORDER BY
-                reservation_date,
-                start_time
-            """,
-            (instrument_id,),
-        ).fetchall()
-
-
-def get_blocked_periods_for_range(
-    instrument_id: int,
-    range_start: date,
-    range_end: date,
-) -> list[sqlite3.Row]:
-
-    with get_connection() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM blocked_periods
-            WHERE
-                instrument_id = ?
-                AND reservation_date >= ?
-                AND reservation_date <= ?
-            ORDER BY
-                reservation_date,
-                start_time
-            """,
-            (
-                instrument_id,
-                range_start.isoformat(),
-                range_end.isoformat(),
-            ),
-        ).fetchall()
-
-
-# ============================================================
 # Login
 # ============================================================
 
@@ -1025,11 +1034,13 @@ def init_session() -> None:
         "manager_id": None,
         "username": None,
         "display_name": None,
-        "edit_reservation_id": None,
-        "verified_reservation_id": None,
     }
 
-    for key, value in defaults.items():
+    for (
+        key,
+        value,
+    ) in defaults.items():
+
         st.session_state.setdefault(
             key,
             value,
@@ -1085,12 +1096,16 @@ def authenticate(
         ] = "system_admin"
 
         st.session_state[
-            "display_name"
-        ] = "システム管理者"
+            "manager_id"
+        ] = None
 
         st.session_state[
             "username"
         ] = username
+
+        st.session_state[
+            "display_name"
+        ] = "システム管理者"
 
         return True
 
@@ -1115,6 +1130,7 @@ def authenticate(
         account["password_salt"],
         account["password_hash"],
     ):
+
         return False
 
     st.session_state[
@@ -1169,8 +1185,8 @@ def manageable_instrument_ids() -> list[int]:
     ):
 
         return [
-            row["id"]
-            for row in get_instruments(
+            instrument["id"]
+            for instrument in get_instruments(
                 active_only=False
             )
         ]
@@ -1195,18 +1211,26 @@ def purpose_label(
     reservation: sqlite3.Row,
 ) -> str:
 
-    if reservation["purpose"] == "その他":
+    if (
+        reservation["purpose"]
+        == "その他"
+    ):
 
         detail = reservation[
             "purpose_other"
         ].strip()
 
         if detail:
+
             return (
                 f"その他（{detail}）"
             )
 
-    return reservation["purpose"]
+        return "その他"
+
+    return reservation[
+        "purpose"
+    ]
 
 
 def field_value_is_empty(
@@ -1214,10 +1238,18 @@ def field_value_is_empty(
     value: Any,
 ) -> bool:
 
-    if field["field_type"] == "checkbox":
+    if (
+        field["field_type"]
+        == "checkbox"
+    ):
+
         return value is False
 
-    if field["field_type"] == "multiselect":
+    if (
+        field["field_type"]
+        == "multiselect"
+    ):
+
         return len(value) == 0
 
     if value is None:
@@ -1227,6 +1259,7 @@ def field_value_is_empty(
         value,
         str,
     ):
+
         return (
             value.strip() == ""
         )
@@ -1240,7 +1273,9 @@ def render_custom_field(
     default_value: Any = None,
 ) -> Any:
 
-    label = field["field_name"]
+    label = field[
+        "field_name"
+    ]
 
     if field["required"]:
         label += " *"
@@ -1264,9 +1299,9 @@ def render_custom_field(
         return st.text_input(
             label,
             value=(
-                str(default_value)
-                if default_value is not None
-                else ""
+                ""
+                if default_value is None
+                else str(default_value)
             ),
             key=widget_key,
         )
@@ -1276,9 +1311,9 @@ def render_custom_field(
         return st.text_area(
             label,
             value=(
-                str(default_value)
-                if default_value is not None
-                else ""
+                ""
+                if default_value is None
+                else str(default_value)
             ),
             key=widget_key,
         )
@@ -1292,6 +1327,7 @@ def render_custom_field(
         index = 0
 
         if default_value in options:
+
             index = (
                 options.index(
                     default_value
@@ -1310,6 +1346,7 @@ def render_custom_field(
             selected
             == "選択してください"
         ):
+
             return ""
 
         return selected
@@ -1329,9 +1366,9 @@ def render_custom_field(
             label,
             options,
             default=[
-                value
-                for value in defaults
-                if value in options
+                item
+                for item in defaults
+                if item in options
             ],
             key=widget_key,
         )
@@ -1339,6 +1376,7 @@ def render_custom_field(
     if field_type == "number":
 
         try:
+
             number_value = float(
                 default_value
             )
@@ -1347,6 +1385,7 @@ def render_custom_field(
             TypeError,
             ValueError,
         ):
+
             number_value = 0.0
 
         return st.number_input(
@@ -1373,13 +1412,6 @@ def render_custom_field(
 # ============================================================
 # Calendar
 # ============================================================
-
-def calendar_times() -> list[str]:
-    return TIME_OPTIONS.copy()
-
-
-CALENDAR_TIMES = calendar_times()
-
 
 def reservation_segment_for_date(
     reservation: sqlite3.Row,
@@ -1422,6 +1454,7 @@ def reservation_segment_for_date(
         segment_start
         >= segment_end
     ):
+
         return None
 
     start_minutes = int(
@@ -1450,9 +1483,13 @@ def build_calendar_html(
     dates: list[date],
     reservations: list[sqlite3.Row],
     blocked_periods: list[sqlite3.Row],
+    instrument_id: int,
 ) -> str:
 
-    column_count = len(dates)
+    column_count = len(
+        dates
+    )
+
     slot_count = 96
 
     minimum_width = (
@@ -1462,7 +1499,9 @@ def build_calendar_html(
 
     css = f"""
     <style>
-    html, body {{
+
+    html,
+    body {{
         margin: 0;
         padding: 0;
         background: transparent;
@@ -1478,23 +1517,29 @@ def build_calendar_html(
 
     .calendar {{
         min-width: {minimum_width}px;
+
         display: grid;
+
         grid-template-columns:
             80px repeat(
                 {column_count},
                 minmax(155px, 1fr)
             );
+
         grid-template-rows:
             48px repeat(
                 {slot_count},
                 {SLOT_HEIGHT}px
             );
+
         position: relative;
+
         font-family:
             -apple-system,
             BlinkMacSystemFont,
             "Segoe UI",
             sans-serif;
+
         font-size: 13px;
     }}
 
@@ -1502,30 +1547,43 @@ def build_calendar_html(
         position: sticky;
         top: 0;
         z-index: 10;
+
         padding: 10px 4px;
+
         text-align: center;
         font-weight: 600;
+
         border-right: 1px solid #ddd;
         border-bottom: 1px solid #bbb;
+
         background: #f7f7f7;
+
         box-sizing: border-box;
     }}
 
     .time {{
         padding: 3px 6px;
+
         text-align: right;
+
         color: #666;
+
         font-size: 11px;
+
         border-right: 1px solid #ddd;
         border-bottom: 1px solid #eee;
+
         background: #fafafa;
+
         box-sizing: border-box;
     }}
 
     .cell {{
         border-right: 1px solid #e0e0e0;
         border-bottom: 1px solid #eeeeee;
+
         background: white;
+
         box-sizing: border-box;
     }}
 
@@ -1533,29 +1591,76 @@ def build_calendar_html(
         border-top: 1px solid #bdbdbd;
     }}
 
-    .reservation {{
+    .reservation-link {{
         z-index: 3;
+
         margin: 2px;
-        padding: 4px 6px;
-        border-radius: 4px;
-        background: #dbeafe;
-        border-left: 4px solid #2563eb;
-        color: #1f2937;
-        box-sizing: border-box;
+
+        text-decoration: none;
+
+        color: inherit;
+
+        display: block;
+
         overflow: hidden;
+
+        border-radius: 4px;
+    }}
+
+    .reservation {{
+        width: 100%;
+        height: 100%;
+
+        padding: 4px 6px;
+
+        border-radius: 4px;
+
+        background: #dbeafe;
+
+        border-left: 4px solid #2563eb;
+
+        color: #1f2937;
+
+        box-sizing: border-box;
+
+        overflow: hidden;
+
         line-height: 1.25;
+
+        transition:
+            background 0.15s ease,
+            box-shadow 0.15s ease;
+    }}
+
+    .reservation:hover {{
+        background: #bfdbfe;
+
+        box-shadow:
+            0 1px 5px
+            rgba(0, 0, 0, 0.18);
+
+        cursor: pointer;
     }}
 
     .blocked {{
         z-index: 3;
+
         margin: 2px;
+
         padding: 4px 6px;
+
         border-radius: 4px;
+
         background: #f3f4f6;
+
         border-left: 4px solid #6b7280;
+
         color: #374151;
+
         box-sizing: border-box;
+
         overflow: hidden;
+
         line-height: 1.25;
     }}
 
@@ -1566,6 +1671,7 @@ def build_calendar_html(
     .small {{
         font-size: 11px;
     }}
+
     </style>
     """
 
@@ -1589,9 +1695,10 @@ def build_calendar_html(
         """
     )
 
-    for day_index, target_date in enumerate(
-        dates
-    ):
+    for (
+        day_index,
+        target_date,
+    ) in enumerate(dates):
 
         grid_column = (
             day_index + 2
@@ -1618,7 +1725,11 @@ def build_calendar_html(
         )
 
     # Background grid
-    for slot_index, slot_time in enumerate(
+
+    for (
+        slot_index,
+        slot_time,
+    ) in enumerate(
         CALENDAR_TIMES
     ):
 
@@ -1680,11 +1791,13 @@ def build_calendar_html(
             )
 
     # Reservations
+
     for reservation in reservations:
 
-        for day_index, target_date in enumerate(
-            dates
-        ):
+        for (
+            day_index,
+            target_date,
+        ) in enumerate(dates):
 
             segment = (
                 reservation_segment_for_date(
@@ -1696,9 +1809,10 @@ def build_calendar_html(
             if segment is None:
                 continue
 
-            start_minutes, end_minutes = (
-                segment
-            )
+            (
+                start_minutes,
+                end_minutes,
+            ) = segment
 
             start_slot = (
                 start_minutes
@@ -1739,10 +1853,20 @@ def build_calendar_html(
                 f"{reservation['end_time']}"
             )
 
+            href = (
+                "?view=reservation"
+                f"&reservation_id="
+                f"{reservation['id']}"
+                f"&instrument_id="
+                f"{instrument_id}"
+            )
+
             content.append(
                 f"""
-                <div
-                    class="reservation"
+                <a
+                    class="reservation-link"
+                    href="{href}"
+                    target="_top"
                     style="
                         grid-column: {grid_column};
                         grid-row:
@@ -1750,22 +1874,29 @@ def build_calendar_html(
                             / span {span};
                     "
                 >
-                    <div class="name">
-                        {name}
+
+                    <div class="reservation">
+
+                        <div class="name">
+                            {name}
+                        </div>
+
+                        <div class="small">
+                            {purpose}
+                        </div>
+
+                        <div class="small">
+                            {time_text}
+                        </div>
+
                     </div>
 
-                    <div class="small">
-                        {purpose}
-                    </div>
-
-                    <div class="small">
-                        {time_text}
-                    </div>
-                </div>
+                </a>
                 """
             )
 
     # Blocked periods
+
     for blocked in blocked_periods:
 
         blocked_date = date.fromisoformat(
@@ -1822,6 +1953,7 @@ def build_calendar_html(
                         / span {span};
                 "
             >
+
                 <div class="name">
                     使用停止
                 </div>
@@ -1829,6 +1961,7 @@ def build_calendar_html(
                 <div class="small">
                     {reason}
                 </div>
+
             </div>
             """
         )
@@ -1850,6 +1983,7 @@ def render_calendar(
     dates: list[date],
     reservations: list[sqlite3.Row],
     blocked_periods: list[sqlite3.Row],
+    instrument_id: int,
 ) -> None:
 
     calendar_html = (
@@ -1857,6 +1991,7 @@ def render_calendar(
             dates,
             reservations,
             blocked_periods,
+            instrument_id,
         )
     )
 
@@ -1873,7 +2008,97 @@ def render_calendar(
 
 
 # ============================================================
-# New reservation
+# Navigation
+# ============================================================
+
+def open_booking_view(
+    instrument_id: int,
+) -> None:
+
+    st.query_params.clear()
+
+    st.query_params[
+        "instrument_id"
+    ] = str(
+        instrument_id
+    )
+
+    st.rerun()
+
+
+def open_new_reservation_view(
+    instrument_id: int,
+) -> None:
+
+    st.query_params.clear()
+
+    st.query_params[
+        "view"
+    ] = "new"
+
+    st.query_params[
+        "instrument_id"
+    ] = str(
+        instrument_id
+    )
+
+    st.rerun()
+
+
+def open_reservation_detail_view(
+    instrument_id: int,
+    reservation_id: int,
+) -> None:
+
+    st.query_params.clear()
+
+    st.query_params[
+        "view"
+    ] = "reservation"
+
+    st.query_params[
+        "instrument_id"
+    ] = str(
+        instrument_id
+    )
+
+    st.query_params[
+        "reservation_id"
+    ] = str(
+        reservation_id
+    )
+
+    st.rerun()
+
+
+def open_edit_reservation_view(
+    instrument_id: int,
+    reservation_id: int,
+) -> None:
+
+    st.query_params.clear()
+
+    st.query_params[
+        "view"
+    ] = "edit"
+
+    st.query_params[
+        "instrument_id"
+    ] = str(
+        instrument_id
+    )
+
+    st.query_params[
+        "reservation_id"
+    ] = str(
+        reservation_id
+    )
+
+    st.rerun()
+
+
+# ============================================================
+# New reservation page
 # ============================================================
 
 def sync_new_end_date() -> None:
@@ -1885,7 +2110,7 @@ def sync_new_end_date() -> None:
     ]
 
 
-def render_new_reservation_form(
+def render_new_reservation_page(
     instrument_id: int,
 ) -> None:
 
@@ -1894,18 +2119,37 @@ def render_new_reservation_form(
     )
 
     if instrument is None:
+
+        st.error(
+            "機器が見つかりません。"
+        )
+
         return
 
-    st.markdown(
-        "### 新規予約"
+    st.header(
+        instrument["name"]
     )
 
+    st.subheader(
+        "新規予約"
+    )
+
+    if st.button(
+        "← 予約状況に戻る"
+    ):
+
+        open_booking_view(
+            instrument_id
+        )
+
     if instrument["description"]:
+
         st.caption(
             instrument["description"]
         )
 
     if instrument["notice"]:
+
         st.info(
             instrument["notice"]
         )
@@ -2021,7 +2265,10 @@ def render_new_reservation_form(
         instrument_id
     )
 
-    custom_values = {}
+    custom_values: dict[
+        int,
+        Any,
+    ] = {}
 
     if fields:
 
@@ -2044,7 +2291,8 @@ def render_new_reservation_form(
         max_chars=4,
         key="new_pin",
         help=(
-            "予約の編集・取消時に必要です。"
+            "予約の編集・取消時に"
+            "必要です。"
         ),
     )
 
@@ -2052,10 +2300,9 @@ def render_new_reservation_form(
         "予約する",
         type="primary",
         use_container_width=True,
-        key="submit_new_reservation",
     ):
 
-        errors = []
+        errors: list[str] = []
 
         start_dt = combine_datetime(
             start_date,
@@ -2119,14 +2366,16 @@ def render_new_reservation_form(
 
         for field in fields:
 
+            value = custom_values[
+                field["id"]
+            ]
+
             if (
                 field["required"]
                 and
                 field_value_is_empty(
                     field,
-                    custom_values[
-                        field["id"]
-                    ],
+                    value,
                 )
             ):
 
@@ -2152,11 +2401,13 @@ def render_new_reservation_form(
 
         if conflict:
 
-            st.error(message)
+            st.error(
+                message
+            )
 
             return
 
-        add_reservation(
+        reservation_id = add_reservation(
             instrument_id=instrument_id,
             user_name=user_name,
             affiliation=affiliation,
@@ -2186,16 +2437,18 @@ def render_new_reservation_form(
             str(instrument_id),
         )
 
-        st.success(
-            "予約しました。"
+        open_reservation_detail_view(
+            instrument_id,
+            reservation_id,
         )
 
 
 # ============================================================
-# Edit reservation
+# Reservation detail page
 # ============================================================
 
-def render_edit_reservation(
+def render_reservation_detail_page(
+    instrument_id: int,
     reservation_id: int,
 ) -> None:
 
@@ -2204,369 +2457,40 @@ def render_edit_reservation(
     )
 
     if reservation is None:
+
+        st.error(
+            "予約が見つかりません。"
+        )
+
         return
 
     if (
-        reservation_end_datetime(
-            reservation
-        )
-        <= datetime.now()
+        reservation["instrument_id"]
+        != instrument_id
     ):
 
         st.error(
-            "この予約は既に終了しているため、"
-            "編集できません。"
-        )
-
-        st.session_state[
-            "edit_reservation_id"
-        ] = None
-
-        return
-
-    st.markdown(
-        "### 予約編集"
-    )
-
-    field_values = (
-        get_reservation_field_value_map(
-            reservation_id
-        )
-    )
-
-    fields = get_custom_fields(
-        reservation["instrument_id"]
-    )
-
-    user_name = st.text_input(
-        "氏名 *",
-        value=reservation["user_name"],
-        key=f"edit_name_{reservation_id}",
-    )
-
-    affiliation = st.text_input(
-        "所属講座 *",
-        value=reservation["affiliation"],
-        key=f"edit_affiliation_{reservation_id}",
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        start_date = st.date_input(
-            "開始日 *",
-            value=date.fromisoformat(
-                reservation["start_date"]
-            ),
-            key=f"edit_start_date_{reservation_id}",
-            format="YYYY/MM/DD",
-        )
-
-    with col2:
-
-        end_date = st.date_input(
-            "終了日 *",
-            value=date.fromisoformat(
-                reservation["end_date"]
-            ),
-            key=f"edit_end_date_{reservation_id}",
-            format="YYYY/MM/DD",
-        )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        start_time = st.selectbox(
-            "開始時刻 *",
-            TIME_OPTIONS,
-            index=TIME_OPTIONS.index(
-                reservation["start_time"]
-            ),
-            key=f"edit_start_time_{reservation_id}",
-        )
-
-    with col2:
-
-        end_time = st.selectbox(
-            "終了時刻 *",
-            TIME_OPTIONS,
-            index=TIME_OPTIONS.index(
-                reservation["end_time"]
-            ),
-            key=f"edit_end_time_{reservation_id}",
-        )
-
-    purpose_options = [
-        "測定",
-        "解析のみ",
-        "その他",
-    ]
-
-    purpose = st.selectbox(
-        "使用目的 *",
-        purpose_options,
-        index=purpose_options.index(
-            reservation["purpose"]
-        ),
-        key=f"edit_purpose_{reservation_id}",
-    )
-
-    purpose_other = (
-        reservation["purpose_other"]
-    )
-
-    if purpose == "その他":
-
-        purpose_other = st.text_input(
-            "「その他」の内容 *",
-            value=reservation[
-                "purpose_other"
-            ],
-            key=f"edit_other_{reservation_id}",
-        )
-
-    remarks = st.text_area(
-        "備考",
-        value=reservation["remarks"],
-        key=f"edit_remarks_{reservation_id}",
-    )
-
-    custom_values = {}
-
-    if fields:
-
-        st.markdown(
-            "#### 機器固有の入力項目"
-        )
-
-        for field in fields:
-
-            custom_values[
-                field["id"]
-            ] = render_custom_field(
-                field,
-                f"edit_field_{reservation_id}",
-                field_values.get(
-                    field["id"]
-                ),
-            )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        if st.button(
-            "変更を保存",
-            type="primary",
-            use_container_width=True,
-            key=f"save_edit_{reservation_id}",
-        ):
-
-            errors = []
-
-            start_dt = combine_datetime(
-                start_date,
-                start_time,
-            )
-
-            end_dt = combine_datetime(
-                end_date,
-                end_time,
-            )
-
-            if not user_name.strip():
-                errors.append(
-                    "氏名を入力してください。"
-                )
-
-            if not affiliation.strip():
-                errors.append(
-                    "所属講座を入力してください。"
-                )
-
-            if end_dt <= start_dt:
-                errors.append(
-                    "終了日時は開始日時より"
-                    "後に設定してください。"
-                )
-
-            if end_dt <= datetime.now():
-                errors.append(
-                    "終了済みの日時へ変更することは"
-                    "できません。"
-                )
-
-            if (
-                purpose == "その他"
-                and
-                not purpose_other.strip()
-            ):
-                errors.append(
-                    "「その他」の内容を"
-                    "入力してください。"
-                )
-
-            for field in fields:
-
-                if (
-                    field["required"]
-                    and
-                    field_value_is_empty(
-                        field,
-                        custom_values[
-                            field["id"]
-                        ],
-                    )
-                ):
-
-                    errors.append(
-                        f"「{field['field_name']}」"
-                        "を入力してください。"
-                    )
-
-            if errors:
-
-                for error in errors:
-                    st.error(error)
-
-                return
-
-            conflict, message = (
-                reservation_has_conflict(
-                    reservation[
-                        "instrument_id"
-                    ],
-                    start_dt,
-                    end_dt,
-                    exclude_reservation_id=(
-                        reservation_id
-                    ),
-                )
-            )
-
-            if conflict:
-
-                st.error(message)
-
-                return
-
-            update_reservation(
-                reservation_id=reservation_id,
-                user_name=user_name,
-                affiliation=affiliation,
-                start_date=start_date,
-                end_date=end_date,
-                start_time=start_time,
-                end_time=end_time,
-                purpose=purpose,
-                purpose_other=purpose_other,
-                remarks=remarks,
-                custom_values=custom_values,
-            )
-
-            write_local_storage(
-                "equipment_booking_name",
-                user_name.strip(),
-            )
-
-            write_local_storage(
-                "equipment_booking_affiliation",
-                affiliation.strip(),
-            )
-
-            st.session_state[
-                "edit_reservation_id"
-            ] = None
-
-            st.success(
-                "予約内容を変更しました。"
-            )
-
-            st.rerun()
-
-    with col2:
-
-        if st.button(
-            "編集をやめる",
-            use_container_width=True,
-            key=f"cancel_edit_{reservation_id}",
-        ):
-
-            st.session_state[
-                "edit_reservation_id"
-            ] = None
-
-            st.rerun()
-
-
-# ============================================================
-# Reservation detail / cancel
-# ============================================================
-
-def render_reservation_operations(
-    reservations: list[sqlite3.Row],
-) -> None:
-
-    if not reservations:
-        return
-
-    st.divider()
-
-    st.markdown(
-        "### 予約の確認・編集・取消"
-    )
-
-    now = datetime.now()
-
-    editable_reservations = [
-        reservation
-        for reservation in reservations
-        if reservation_end_datetime(
-            reservation
-        ) > now
-    ]
-
-    if not editable_reservations:
-
-        st.caption(
-            "編集または取消可能な予約はありません。"
+            "予約情報と機器情報が"
+            "一致しません。"
         )
 
         return
 
-    reservation_map = {}
+    st.header(
+        reservation["instrument_name"]
+    )
 
-    for reservation in editable_reservations:
+    st.subheader(
+        "予約詳細"
+    )
 
-        label = (
-            f"{format_reservation_period(reservation)}"
-            f" ｜ {reservation['user_name']}"
+    if st.button(
+        "← 予約状況に戻る"
+    ):
+
+        open_booking_view(
+            instrument_id
         )
-
-        reservation_map[
-            label
-        ] = reservation["id"]
-
-    selected_label = st.selectbox(
-        "予約を選択",
-        list(
-            reservation_map.keys()
-        ),
-        key="selected_reservation_operation",
-    )
-
-    reservation_id = reservation_map[
-        selected_label
-    ]
-
-    reservation = get_reservation(
-        reservation_id
-    )
-
-    if reservation is None:
-        return
 
     with st.container(
         border=True
@@ -2592,93 +2516,529 @@ def render_reservation_operations(
             f"{purpose_label(reservation)}"
         )
 
-        pin = st.text_input(
-            "4桁の暗証番号",
-            type="password",
-            max_chars=4,
+        if reservation["remarks"]:
+
+            st.write(
+                f"**備考：** "
+                f"{reservation['remarks']}"
+            )
+
+        for field_value in (
+            get_reservation_field_values(
+                reservation_id
+            )
+        ):
+
+            value = json.loads(
+                field_value[
+                    "value_json"
+                ]
+            )
+
+            if isinstance(
+                value,
+                list,
+            ):
+
+                display_value = (
+                    "、".join(
+                        map(
+                            str,
+                            value,
+                        )
+                    )
+                )
+
+            elif isinstance(
+                value,
+                bool,
+            ):
+
+                display_value = (
+                    "はい"
+                    if value
+                    else "いいえ"
+                )
+
+            else:
+
+                display_value = str(
+                    value
+                )
+
+            st.write(
+                f"**"
+                f"{field_value['field_name_snapshot']}"
+                f"：** "
+                f"{display_value}"
+            )
+
+    ended = (
+        reservation_end_datetime(
+            reservation
+        )
+        <= datetime.now()
+    )
+
+    if ended:
+
+        st.info(
+            "この予約は既に終了しているため、"
+            "編集・取消はできません。"
+        )
+
+        return
+
+    st.markdown(
+        "### 予約の編集・取消"
+    )
+
+    pin = st.text_input(
+        "4桁の暗証番号",
+        type="password",
+        max_chars=4,
+        key=(
+            f"detail_pin_"
+            f"{reservation_id}"
+        ),
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        if st.button(
+            "予約を編集",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            if not verify_hash(
+                pin,
+                reservation["pin_salt"],
+                reservation["pin_hash"],
+            ):
+
+                st.error(
+                    "暗証番号が正しくありません。"
+                )
+
+            else:
+
+                open_edit_reservation_view(
+                    instrument_id,
+                    reservation_id,
+                )
+
+    with col2:
+
+        if st.button(
+            "予約を取り消す",
+            use_container_width=True,
+        ):
+
+            if not verify_hash(
+                pin,
+                reservation["pin_salt"],
+                reservation["pin_hash"],
+            ):
+
+                st.error(
+                    "暗証番号が正しくありません。"
+                )
+
+            elif (
+                reservation_end_datetime(
+                    reservation
+                )
+                <= datetime.now()
+            ):
+
+                st.error(
+                    "終了済みの予約は"
+                    "取り消せません。"
+                )
+
+            else:
+
+                delete_reservation(
+                    reservation_id
+                )
+
+                open_booking_view(
+                    instrument_id
+                )
+
+
+# ============================================================
+# Edit reservation page
+# ============================================================
+
+def render_edit_reservation_page(
+    instrument_id: int,
+    reservation_id: int,
+) -> None:
+
+    reservation = get_reservation(
+        reservation_id
+    )
+
+    if reservation is None:
+
+        st.error(
+            "予約が見つかりません。"
+        )
+
+        return
+
+    if (
+        reservation["instrument_id"]
+        != instrument_id
+    ):
+
+        st.error(
+            "予約情報と機器情報が"
+            "一致しません。"
+        )
+
+        return
+
+    if (
+        reservation_end_datetime(
+            reservation
+        )
+        <= datetime.now()
+    ):
+
+        st.error(
+            "この予約は既に終了しているため、"
+            "編集できません。"
+        )
+
+        return
+
+    st.header(
+        reservation["instrument_name"]
+    )
+
+    st.subheader(
+        "予約編集"
+    )
+
+    if st.button(
+        "← 予約詳細に戻る"
+    ):
+
+        open_reservation_detail_view(
+            instrument_id,
+            reservation_id,
+        )
+
+    field_values = (
+        get_reservation_field_value_map(
+            reservation_id
+        )
+    )
+
+    fields = get_custom_fields(
+        instrument_id
+    )
+
+    user_name = st.text_input(
+        "氏名 *",
+        value=reservation[
+            "user_name"
+        ],
+        key=(
+            f"edit_name_"
+            f"{reservation_id}"
+        ),
+    )
+
+    affiliation = st.text_input(
+        "所属講座 *",
+        value=reservation[
+            "affiliation"
+        ],
+        key=(
+            f"edit_affiliation_"
+            f"{reservation_id}"
+        ),
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        start_date = st.date_input(
+            "開始日 *",
+            value=date.fromisoformat(
+                reservation["start_date"]
+            ),
             key=(
-                f"operation_pin_"
+                f"edit_start_date_"
+                f"{reservation_id}"
+            ),
+            format="YYYY/MM/DD",
+        )
+
+    with col2:
+
+        end_date = st.date_input(
+            "終了日 *",
+            value=date.fromisoformat(
+                reservation["end_date"]
+            ),
+            key=(
+                f"edit_end_date_"
+                f"{reservation_id}"
+            ),
+            format="YYYY/MM/DD",
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        start_time = st.selectbox(
+            "開始時刻 *",
+            TIME_OPTIONS,
+            index=TIME_OPTIONS.index(
+                reservation["start_time"]
+            ),
+            key=(
+                f"edit_start_time_"
                 f"{reservation_id}"
             ),
         )
 
-        col1, col2 = st.columns(2)
+    with col2:
 
-        with col1:
+        end_time = st.selectbox(
+            "終了時刻 *",
+            TIME_OPTIONS,
+            index=TIME_OPTIONS.index(
+                reservation["end_time"]
+            ),
+            key=(
+                f"edit_end_time_"
+                f"{reservation_id}"
+            ),
+        )
 
-            if st.button(
-                "予約を編集",
-                type="primary",
-                use_container_width=True,
-                key=f"edit_button_{reservation_id}",
+    purpose_options = [
+        "測定",
+        "解析のみ",
+        "その他",
+    ]
+
+    purpose = st.selectbox(
+        "使用目的 *",
+        purpose_options,
+        index=purpose_options.index(
+            reservation["purpose"]
+        ),
+        key=(
+            f"edit_purpose_"
+            f"{reservation_id}"
+        ),
+    )
+
+    purpose_other = reservation[
+        "purpose_other"
+    ]
+
+    if purpose == "その他":
+
+        purpose_other = st.text_input(
+            "「その他」の内容 *",
+            value=reservation[
+                "purpose_other"
+            ],
+            key=(
+                f"edit_other_"
+                f"{reservation_id}"
+            ),
+        )
+
+    remarks = st.text_area(
+        "備考",
+        value=reservation[
+            "remarks"
+        ],
+        key=(
+            f"edit_remarks_"
+            f"{reservation_id}"
+        ),
+    )
+
+    custom_values: dict[
+        int,
+        Any,
+    ] = {}
+
+    if fields:
+
+        st.markdown(
+            "#### 機器固有の入力項目"
+        )
+
+        for field in fields:
+
+            custom_values[
+                field["id"]
+            ] = render_custom_field(
+                field,
+                (
+                    f"edit_field_"
+                    f"{reservation_id}"
+                ),
+                field_values.get(
+                    field["id"]
+                ),
+            )
+
+    if st.button(
+        "変更を保存",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        errors: list[str] = []
+
+        start_dt = combine_datetime(
+            start_date,
+            start_time,
+        )
+
+        end_dt = combine_datetime(
+            end_date,
+            end_time,
+        )
+
+        if not user_name.strip():
+
+            errors.append(
+                "氏名を入力してください。"
+            )
+
+        if not affiliation.strip():
+
+            errors.append(
+                "所属講座を入力してください。"
+            )
+
+        if end_dt <= start_dt:
+
+            errors.append(
+                "終了日時は開始日時より"
+                "後に設定してください。"
+            )
+
+        if end_dt <= datetime.now():
+
+            errors.append(
+                "終了済みの日時へ変更することは"
+                "できません。"
+            )
+
+        if (
+            purpose == "その他"
+            and
+            not purpose_other.strip()
+        ):
+
+            errors.append(
+                "「その他」の内容を"
+                "入力してください。"
+            )
+
+        for field in fields:
+
+            value = custom_values[
+                field["id"]
+            ]
+
+            if (
+                field["required"]
+                and
+                field_value_is_empty(
+                    field,
+                    value,
+                )
             ):
 
-                if not verify_hash(
-                    pin,
-                    reservation["pin_salt"],
-                    reservation["pin_hash"],
-                ):
+                errors.append(
+                    f"「{field['field_name']}」"
+                    "を入力してください。"
+                )
 
-                    st.error(
-                        "暗証番号が正しくありません。"
-                    )
+        if errors:
 
-                else:
+            for error in errors:
+                st.error(error)
 
-                    st.session_state[
-                        "edit_reservation_id"
-                    ] = reservation_id
+            return
 
-                    st.rerun()
+        conflict, message = (
+            reservation_has_conflict(
+                instrument_id,
+                start_dt,
+                end_dt,
+                exclude_reservation_id=(
+                    reservation_id
+                ),
+            )
+        )
 
-        with col2:
+        if conflict:
 
-            if st.button(
-                "予約を取り消す",
-                use_container_width=True,
-                key=f"delete_button_{reservation_id}",
-            ):
+            st.error(
+                message
+            )
 
-                if not verify_hash(
-                    pin,
-                    reservation["pin_salt"],
-                    reservation["pin_hash"],
-                ):
+            return
 
-                    st.error(
-                        "暗証番号が正しくありません。"
-                    )
+        update_reservation(
+            reservation_id=reservation_id,
+            user_name=user_name,
+            affiliation=affiliation,
+            start_date=start_date,
+            end_date=end_date,
+            start_time=start_time,
+            end_time=end_time,
+            purpose=purpose,
+            purpose_other=purpose_other,
+            remarks=remarks,
+            custom_values=custom_values,
+        )
 
-                elif (
-                    reservation_end_datetime(
-                        reservation
-                    )
-                    <= datetime.now()
-                ):
+        write_local_storage(
+            "equipment_booking_name",
+            user_name.strip(),
+        )
 
-                    st.error(
-                        "終了済みの予約は"
-                        "取り消せません。"
-                    )
+        write_local_storage(
+            "equipment_booking_affiliation",
+            affiliation.strip(),
+        )
 
-                else:
+        write_local_storage(
+            "equipment_booking_last_instrument",
+            str(instrument_id),
+        )
 
-                    delete_reservation(
-                        reservation_id
-                    )
-
-                    st.success(
-                        "予約を取り消しました。"
-                    )
-
-                    st.rerun()
+        open_reservation_detail_view(
+            instrument_id,
+            reservation_id,
+        )
 
 
 # ============================================================
-# Main booking page
+# Booking calendar page
 # ============================================================
 
-def page_booking(
+def render_booking_page(
     instrument_id: int,
 ) -> None:
 
@@ -2687,6 +3047,11 @@ def page_booking(
     )
 
     if instrument is None:
+
+        st.error(
+            "機器が見つかりません。"
+        )
+
         return
 
     st.header(
@@ -2694,13 +3059,31 @@ def page_booking(
     )
 
     if instrument["notice"]:
+
         st.info(
             instrument["notice"]
         )
 
-    col1, col2, col3 = st.columns(
-        [1, 1, 2]
+    col1, col2 = st.columns(
+        [1, 3]
     )
+
+    with col1:
+
+        if st.button(
+            "＋ 新規予約",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            open_new_reservation_view(
+                instrument_id
+            )
+
+    with col2:
+        st.write("")
+
+    col1, col2 = st.columns(2)
 
     with col1:
 
@@ -2719,17 +3102,6 @@ def page_booking(
             "表示日",
             value=date.today(),
             format="YYYY/MM/DD",
-        )
-
-    with col3:
-
-        st.write("")
-
-        st.write("")
-
-        show_new_form = st.toggle(
-            "新規予約フォームを表示",
-            value=False,
         )
 
     if view_mode == "週間":
@@ -2753,6 +3125,7 @@ def page_booking(
 
         start_date = selected_date
         end_date = selected_date
+
         dates = [
             selected_date
         ]
@@ -2777,36 +3150,8 @@ def page_booking(
         dates,
         reservations,
         blocked_periods,
+        instrument_id,
     )
-
-    if (
-        st.session_state[
-            "edit_reservation_id"
-        ]
-        is not None
-    ):
-
-        st.divider()
-
-        render_edit_reservation(
-            st.session_state[
-                "edit_reservation_id"
-            ]
-        )
-
-    else:
-
-        render_reservation_operations(
-            reservations
-        )
-
-        if show_new_form:
-
-            st.divider()
-
-            render_new_reservation_form(
-                instrument_id
-            )
 
     st.divider()
 
@@ -2816,22 +3161,20 @@ def page_booking(
 
         clear_local_storage()
 
-        for key in [
+        st.session_state.pop(
             "new_name",
-            "new_affiliation",
-        ]:
+            None,
+        )
 
-            st.session_state.pop(
-                key,
-                None,
-            )
+        st.session_state.pop(
+            "new_affiliation",
+            None,
+        )
 
         st.success(
             "保存された利用者情報を"
             "クリアしました。"
         )
-
-        st.rerun()
 
 
 # ============================================================
@@ -2901,7 +3244,7 @@ def render_login() -> bool:
 
 
 # ============================================================
-# System administration
+# System administrator
 # ============================================================
 
 def admin_instrument_management() -> None:
@@ -2962,10 +3305,6 @@ def admin_instrument_management() -> None:
                         ),
                     )
 
-                st.success(
-                    "機器を追加しました。"
-                )
-
                 st.rerun()
 
             except sqlite3.IntegrityError:
@@ -2985,7 +3324,9 @@ def admin_instrument_management() -> None:
 
             new_name = st.text_input(
                 "機器名",
-                value=instrument["name"],
+                value=instrument[
+                    "name"
+                ],
                 key=(
                     f"admin_instrument_name_"
                     f"{instrument['id']}"
@@ -2994,7 +3335,9 @@ def admin_instrument_management() -> None:
 
             description = st.text_area(
                 "説明",
-                value=instrument["description"],
+                value=instrument[
+                    "description"
+                ],
                 key=(
                     f"admin_description_"
                     f"{instrument['id']}"
@@ -3002,8 +3345,10 @@ def admin_instrument_management() -> None:
             )
 
             notice = st.text_area(
-                "注意事項",
-                value=instrument["notice"],
+                "利用者への注意事項",
+                value=instrument[
+                    "notice"
+                ],
                 key=(
                     f"admin_notice_"
                     f"{instrument['id']}"
@@ -3066,7 +3411,8 @@ def admin_instrument_management() -> None:
             )
 
             confirm = st.checkbox(
-                "予約情報を含め、この機器を削除する",
+                "予約情報を含め、"
+                "この機器を削除する",
                 key=(
                     f"admin_confirm_delete_"
                     f"{instrument['id']}"
@@ -3211,18 +3557,22 @@ def admin_manager_management() -> None:
             "assign_instrument"
         ):
 
-            selected_manager = st.selectbox(
-                "機器管理者",
-                list(
-                    manager_map.keys()
-                ),
+            selected_manager = (
+                st.selectbox(
+                    "機器管理者",
+                    list(
+                        manager_map.keys()
+                    ),
+                )
             )
 
-            selected_instrument = st.selectbox(
-                "機器",
-                list(
-                    instrument_map.keys()
-                ),
+            selected_instrument = (
+                st.selectbox(
+                    "機器",
+                    list(
+                        instrument_map.keys()
+                    ),
+                )
             )
 
             submitted = (
@@ -3262,6 +3612,144 @@ def admin_manager_management() -> None:
                 st.error(
                     "既に割り当て済みです。"
                 )
+
+    st.markdown(
+        "### 登録済み機器管理者"
+    )
+
+    for manager in managers:
+
+        with st.expander(
+            (
+                f"{manager['display_name']}"
+                f"（{manager['username']}）"
+            )
+        ):
+
+            with get_connection() as conn:
+
+                assigned = conn.execute(
+                    """
+                    SELECT
+                        im.id AS assignment_id,
+                        i.name AS instrument_name
+                    FROM instrument_managers im
+                    JOIN instruments i
+                        ON i.id = im.instrument_id
+                    WHERE im.manager_id = ?
+                    ORDER BY i.name
+                    """,
+                    (manager["id"],),
+                ).fetchall()
+
+            for row in assigned:
+
+                col1, col2 = st.columns(
+                    [5, 1]
+                )
+
+                with col1:
+
+                    st.write(
+                        row["instrument_name"]
+                    )
+
+                with col2:
+
+                    if st.button(
+                        "解除",
+                        key=(
+                            f"remove_assignment_"
+                            f"{row['assignment_id']}"
+                        ),
+                    ):
+
+                        with get_connection() as conn:
+
+                            conn.execute(
+                                """
+                                DELETE FROM instrument_managers
+                                WHERE id = ?
+                                """,
+                                (
+                                    row[
+                                        "assignment_id"
+                                    ],
+                                ),
+                            )
+
+                        st.rerun()
+
+            active = st.checkbox(
+                "アカウントを有効にする",
+                value=bool(
+                    manager["active"]
+                ),
+                key=(
+                    f"manager_active_"
+                    f"{manager['id']}"
+                ),
+            )
+
+            new_password = st.text_input(
+                "新しいパスワード",
+                type="password",
+                key=(
+                    f"manager_password_"
+                    f"{manager['id']}"
+                ),
+                help=(
+                    "変更しない場合は"
+                    "空欄のままにしてください。"
+                ),
+            )
+
+            if st.button(
+                "アカウント設定を保存",
+                key=(
+                    f"save_manager_"
+                    f"{manager['id']}"
+                ),
+            ):
+
+                with get_connection() as conn:
+
+                    conn.execute(
+                        """
+                        UPDATE manager_accounts
+                        SET active = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            int(active),
+                            manager["id"],
+                        ),
+                    )
+
+                    if new_password:
+
+                        salt, password_hash = (
+                            make_hash(
+                                new_password
+                            )
+                        )
+
+                        conn.execute(
+                            """
+                            UPDATE manager_accounts
+                            SET
+                                password_salt = ?,
+                                password_hash = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                salt,
+                                password_hash,
+                                manager["id"],
+                            ),
+                        )
+
+                st.rerun()
 
 
 # ============================================================
@@ -3395,11 +3883,9 @@ def custom_field_management(
 
             st.rerun()
 
-    fields = get_custom_fields(
+    for field in get_custom_fields(
         instrument_id
-    )
-
-    for field in fields:
+    ):
 
         col1, col2 = st.columns(
             [6, 1]
@@ -3409,7 +3895,7 @@ def custom_field_management(
 
             st.write(
                 f"**{field['field_name']}**"
-                f" ｜ "
+                " ｜ "
                 f"{'必須' if field['required'] else '任意'}"
             )
 
@@ -3514,7 +4000,9 @@ def blocked_period_management(
 
             if conflict:
 
-                st.error(message)
+                st.error(
+                    message
+                )
 
             else:
 
@@ -3570,8 +4058,9 @@ def manager_instrument_settings() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     selected_name = st.selectbox(
@@ -3598,12 +4087,16 @@ def manager_instrument_settings() -> None:
 
     description = st.text_area(
         "機器の説明",
-        value=instrument["description"],
+        value=instrument[
+            "description"
+        ],
     )
 
     notice = st.text_area(
         "利用者への注意事項",
-        value=instrument["notice"],
+        value=instrument[
+            "notice"
+        ],
     )
 
     if st.button(
@@ -3654,13 +4147,19 @@ def manager_instrument_settings() -> None:
 
     confirm = st.checkbox(
         f"「{instrument['name']}」を削除する",
-        key=f"manager_delete_confirm_{instrument_id}",
+        key=(
+            f"manager_delete_confirm_"
+            f"{instrument_id}"
+        ),
     )
 
     if st.button(
         "担当機器をシステムから削除",
         disabled=not confirm,
-        key=f"manager_delete_instrument_{instrument_id}",
+        key=(
+            f"manager_delete_instrument_"
+            f"{instrument_id}"
+        ),
     ):
 
         delete_instrument(
@@ -3697,8 +4196,9 @@ def manager_reservation_management() -> None:
         return
 
     instrument_map = {
-        row["name"]: row["id"]
-        for row in instruments
+        instrument["name"]:
+            instrument["id"]
+        for instrument in instruments
     }
 
     selected_name = st.selectbox(
@@ -3706,7 +4206,9 @@ def manager_reservation_management() -> None:
         list(
             instrument_map.keys()
         ),
-        key="manager_reservation_instrument",
+        key=(
+            "manager_reservation_instrument"
+        ),
     )
 
     reservations = get_reservations(
@@ -3714,6 +4216,14 @@ def manager_reservation_management() -> None:
             selected_name
         ]
     )
+
+    if not reservations:
+
+        st.info(
+            "予約はありません。"
+        )
+
+        return
 
     for reservation in reservations:
 
@@ -3748,18 +4258,29 @@ def manager_reservation_management() -> None:
             ):
 
                 value = json.loads(
-                    field_value["value_json"]
+                    field_value[
+                        "value_json"
+                    ]
                 )
 
-                if isinstance(value, list):
+                if isinstance(
+                    value,
+                    list,
+                ):
 
                     display_value = (
                         "、".join(
-                            map(str, value)
+                            map(
+                                str,
+                                value,
+                            )
                         )
                     )
 
-                elif isinstance(value, bool):
+                elif isinstance(
+                    value,
+                    bool,
+                ):
 
                     display_value = (
                         "はい"
@@ -3819,15 +4340,19 @@ def page_management() -> None:
         )
 
         with tabs[0]:
+
             admin_instrument_management()
 
         with tabs[1]:
+
             admin_manager_management()
 
         with tabs[2]:
+
             manager_instrument_settings()
 
         with tabs[3]:
+
             manager_reservation_management()
 
     else:
@@ -3840,9 +4365,11 @@ def page_management() -> None:
         )
 
         with tabs[0]:
+
             manager_instrument_settings()
 
         with tabs[1]:
+
             manager_reservation_management()
 
 
@@ -3850,9 +4377,73 @@ def page_management() -> None:
 # Main
 # ============================================================
 
+def resolve_instrument_id(
+    instruments: list[sqlite3.Row],
+) -> int:
+
+    instrument_ids = [
+        instrument["id"]
+        for instrument in instruments
+    ]
+
+    requested_instrument_id = (
+        st.query_params.get(
+            "instrument_id"
+        )
+    )
+
+    if requested_instrument_id:
+
+        try:
+
+            requested_id = int(
+                requested_instrument_id
+            )
+
+            if (
+                requested_id
+                in instrument_ids
+            ):
+
+                return requested_id
+
+        except ValueError:
+
+            pass
+
+    last_instrument = (
+        read_local_storage(
+            "equipment_booking_last_instrument"
+        )
+    )
+
+    try:
+
+        last_instrument_id = int(
+            last_instrument
+        )
+
+        if (
+            last_instrument_id
+            in instrument_ids
+        ):
+
+            return last_instrument_id
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        pass
+
+    return instrument_ids[0]
+
+
 def main() -> None:
 
     init_db()
+
     init_session()
 
     st.title(
@@ -3886,68 +4477,135 @@ def main() -> None:
 
         return
 
+    current_instrument_id = (
+        resolve_instrument_id(
+            instruments
+        )
+    )
+
     st.sidebar.divider()
 
     st.sidebar.subheader(
         "機器選択"
     )
 
-    instrument_ids = [
-        instrument["id"]
-        for instrument in instruments
-    ]
-
-    last_instrument = read_local_storage(
-        "equipment_booking_last_instrument"
-    )
-
-    default_index = 0
-
-    try:
-
-        last_instrument_id = int(
-            last_instrument
-        )
-
-        if (
-            last_instrument_id
-            in instrument_ids
-        ):
-
-            default_index = (
-                instrument_ids.index(
-                    last_instrument_id
-                )
-            )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        pass
-
-    instrument_name_map = {
+    instrument_map = {
         instrument["name"]:
             instrument["id"]
         for instrument in instruments
     }
 
+    instrument_names = list(
+        instrument_map.keys()
+    )
+
+    current_name = next(
+        instrument["name"]
+        for instrument in instruments
+        if (
+            instrument["id"]
+            == current_instrument_id
+        )
+    )
+
     selected_name = st.sidebar.radio(
         "予約する機器",
-        list(
-            instrument_name_map.keys()
+        instrument_names,
+        index=instrument_names.index(
+            current_name
         ),
-        index=default_index,
         label_visibility="collapsed",
     )
 
     selected_instrument_id = (
-        instrument_name_map[
+        instrument_map[
             selected_name
         ]
     )
 
-    page_booking(
+    if (
+        selected_instrument_id
+        != current_instrument_id
+    ):
+
+        write_local_storage(
+            "equipment_booking_last_instrument",
+            str(
+                selected_instrument_id
+            ),
+        )
+
+        st.query_params.clear()
+
+        st.query_params[
+            "instrument_id"
+        ] = str(
+            selected_instrument_id
+        )
+
+        st.rerun()
+
+    view = st.query_params.get(
+        "view",
+        "",
+    )
+
+    reservation_id_text = (
+        st.query_params.get(
+            "reservation_id",
+            "",
+        )
+    )
+
+    if view == "new":
+
+        render_new_reservation_page(
+            selected_instrument_id
+        )
+
+        return
+
+    if (
+        view
+        in {
+            "reservation",
+            "edit",
+        }
+        and
+        reservation_id_text
+    ):
+
+        try:
+
+            reservation_id = int(
+                reservation_id_text
+            )
+
+        except ValueError:
+
+            st.error(
+                "予約IDが正しくありません。"
+            )
+
+            return
+
+        if view == "reservation":
+
+            render_reservation_detail_page(
+                selected_instrument_id,
+                reservation_id,
+            )
+
+        else:
+
+            render_edit_reservation_page(
+                selected_instrument_id,
+                reservation_id,
+            )
+
+        return
+
+    render_booking_page(
         selected_instrument_id
     )
 
