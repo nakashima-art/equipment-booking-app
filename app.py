@@ -2478,6 +2478,7 @@ def render_booking_page(
         "＋ 新規予約",
         type="primary",
         use_container_width=mobile,
+        key=f"new_reservation_button_{instrument_id}",
     ):
         open_new_reservation_view(instrument_id)
 
@@ -3384,7 +3385,7 @@ def render_mobile_instrument_selector(
         "機器",
         instrument_names,
         index=instrument_names.index(current_name),
-        key="mobile_instrument_selector",
+        key=f"mobile_instrument_selector_{current_instrument_id}",
         label_visibility="collapsed",
     )
 
@@ -3593,34 +3594,39 @@ def main() -> None:
         instruments
     )
 
-    st.sidebar.divider()
-    st.sidebar.subheader("機器選択")
+    # スマホでは上部の機器選択のみを使用する。
+    # サイドバー側の機器選択を同時に描画すると、
+    # 2つのradioが独立したSession Stateを持ち、
+    # query_paramsによる画面遷移を打ち消すことがある。
+    if not is_mobile_device():
+        st.sidebar.divider()
+        st.sidebar.subheader("機器選択")
 
-    instrument_map = {
-        instrument["name"]: instrument["id"]
-        for instrument in instruments
-    }
+        instrument_map = {
+            instrument["name"]: instrument["id"]
+            for instrument in instruments
+        }
 
-    instrument_names = list(instrument_map.keys())
+        instrument_names = list(instrument_map.keys())
 
-    current_name = next(
-        instrument["name"]
-        for instrument in instruments
-        if instrument["id"] == current_instrument_id
-    )
+        current_name = next(
+            instrument["name"]
+            for instrument in instruments
+            if instrument["id"] == current_instrument_id
+        )
 
-    selected_name = st.sidebar.radio(
-        "予約する機器",
-        instrument_names,
-        index=instrument_names.index(current_name),
-        key="sidebar_instrument_selector",
-        label_visibility="collapsed",
-    )
+        selected_name = st.sidebar.radio(
+            "予約する機器",
+            instrument_names,
+            index=instrument_names.index(current_name),
+            key="sidebar_instrument_selector",
+            label_visibility="collapsed",
+        )
 
-    selected_instrument_id = instrument_map[selected_name]
+        selected_instrument_id = instrument_map[selected_name]
 
-    if selected_instrument_id != current_instrument_id:
-        change_instrument(selected_instrument_id)
+        if selected_instrument_id != current_instrument_id:
+            change_instrument(selected_instrument_id)
 
     st.sidebar.divider()
 
