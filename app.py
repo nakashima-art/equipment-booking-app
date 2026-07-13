@@ -1425,8 +1425,7 @@ def build_calendar_html(
                     f"&start_time={slot_time}"
                 )
                 content.append(
-                    f'<a class="cell-link{hour_class}" href="#" '
-                    f'onclick="window.parent.location.href=\'{href}\'; return false;" '
+                    f'<a class="cell-link{hour_class}" href="{href}" target="_top" '
                     f'title="この時刻から予約" '
                     f'style="grid-column:{grid_column};grid-row:{grid_row};"></a>'
                 )
@@ -1469,8 +1468,7 @@ def build_calendar_html(
             )
 
             content.append(
-                f'<a class="reservation-link" href="#" '
-                f'onclick="window.parent.location.href=\'{href}\'; return false;" '
+                f'<a class="reservation-link" href="{href}" target="_top" '
                 f'style="grid-column:{grid_column};'
                 f'grid-row:{grid_row} / span {span};">'
                 f'<div class="reservation">'
