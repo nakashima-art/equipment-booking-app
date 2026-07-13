@@ -3787,6 +3787,20 @@ def main() -> None:
             queue_access_authorization_clear()
             st.rerun()
 
+    st.sidebar.markdown(
+        """
+        <div style="
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #777;
+            line-height: 1.4;
+        ">
+            作成者：中島（薬用資源学講座）
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if page == "管理者":
         page_management()
         return
