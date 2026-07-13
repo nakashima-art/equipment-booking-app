@@ -339,6 +339,8 @@ def init_session() -> None:
         "saved_instrument_id": None,
         "saved_instrument_order": [],
         "pending_browser_action": None,
+        "pending_scroll_top": False,
+        "scroll_top_token": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -533,6 +535,46 @@ def flush_pending_browser_action() -> bool:
 
     st.session_state["pending_browser_action"] = None
     return True
+
+
+def request_scroll_top() -> None:
+    st.session_state["pending_scroll_top"] = True
+    st.session_state["scroll_top_token"] = secrets.token_hex(8)
+
+
+def flush_scroll_top() -> None:
+    if not st.session_state.get("pending_scroll_top"):
+        return
+
+    token = st.session_state.get("scroll_top_token") or secrets.token_hex(8)
+
+    streamlit_js_eval(
+        js_expressions="""
+        (() => {
+            try {
+                window.parent.scrollTo(0, 0);
+
+                const root =
+                    window.parent.document.scrollingElement
+                    || window.parent.document.documentElement
+                    || window.parent.document.body;
+
+                if (root) {
+                    root.scrollTop = 0;
+                }
+
+                return "scrolled";
+            } catch (error) {
+                window.scrollTo(0, 0);
+                return "fallback";
+            }
+        })()
+        """,
+        key=f"scroll_top_{token}",
+    )
+
+    st.session_state["pending_scroll_top"] = False
+    st.session_state["scroll_top_token"] = None
 
 
 def is_mobile_device() -> bool:
@@ -3354,6 +3396,7 @@ def resolve_instrument_id(instruments: list[sqlite3.Row]) -> int:
 
 
 def change_instrument(instrument_id: int) -> None:
+    request_scroll_top()
     st.query_params.clear()
     st.query_params["instrument_id"] = str(instrument_id)
     st.rerun()
@@ -3563,6 +3606,8 @@ def main() -> None:
     if not flush_pending_browser_action():
         st.info("利用者情報を保存しています...")
         st.stop()
+
+    flush_scroll_top()
 
     st.title(APP_TITLE)
 
