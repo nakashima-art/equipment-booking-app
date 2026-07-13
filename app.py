@@ -1512,7 +1512,7 @@ def build_calendar_html(
                     f"&start_time={slot_time}"
                 )
                 content.append(
-                    f'<a class="cell-link{hour_class}" href="{href}" '
+                    f'<a class="cell-link{hour_class}" href="{href}" target="_self" '
                     f'title="この時刻から予約" '
                     f'style="grid-column:{grid_column};grid-row:{grid_row};"></a>'
                 )
@@ -1555,7 +1555,7 @@ def build_calendar_html(
             )
 
             content.append(
-                f'<a class="reservation-link" href="{href}" '
+                f'<a class="reservation-link" href="{href}" target="_self" '
                 f'style="grid-column:{grid_column};'
                 f'grid-row:{grid_row} / span {span};">'
                 f'<div class="reservation">'
@@ -1606,9 +1606,9 @@ def render_calendar(
         compact_mode,
     )
 
-    # カレンダーをiframeではなくメイン画面へ直接描画する。
-    # これにより、カレンダー内のリンクは現在のブラウザタブで遷移し、
-    # アプリ全体がカレンダー内へ入れ子表示されることもない。
+    # カレンダーはiframeではなくメイン画面へ直接描画する。
+    # リンクは現在のブラウザタブ内で遷移するよう明示する。
+    # サイドバーを含むアプリの入れ子表示や新規タブ生成を防ぐ。
     st.markdown(
         calendar_html,
         unsafe_allow_html=True,
