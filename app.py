@@ -2456,7 +2456,6 @@ def render_instrument_order_settings(
 
 def render_booking_page(
     instrument_id: int,
-    instruments: list[sqlite3.Row],
 ) -> None:
     instrument = get_instrument(instrument_id)
 
@@ -2547,12 +2546,6 @@ def render_booking_page(
         blocked_periods,
         instrument_id,
         compact_mode=mobile and view_mode == "週間",
-    )
-
-    st.divider()
-
-    render_instrument_order_settings(
-        instruments
     )
 
     st.divider()
@@ -3399,6 +3392,157 @@ def render_mobile_instrument_selector(
     st.divider()
 
 
+def render_sidebar_instrument_order_settings(
+    instruments: list[sqlite3.Row],
+) -> None:
+    with st.sidebar.expander(
+        "機器表示順"
+    ):
+        st.caption(
+            "このブラウザでの機器表示順を変更できます。"
+        )
+
+        default_order = [
+            instrument["id"]
+            for instrument in instruments
+        ]
+
+        normalized_saved_order = (
+            normalize_instrument_order(
+                instruments
+            )
+        )
+
+        draft_key = "instrument_order_draft"
+
+        draft_order = st.session_state.get(
+            draft_key
+        )
+
+        if (
+            not isinstance(
+                draft_order,
+                list,
+            )
+            or set(draft_order)
+            != set(default_order)
+            or len(draft_order)
+            != len(default_order)
+        ):
+            st.session_state[
+                draft_key
+            ] = normalized_saved_order.copy()
+
+        instrument_by_id = {
+            instrument["id"]: instrument
+            for instrument in instruments
+        }
+
+        current_order = st.session_state[
+            draft_key
+        ].copy()
+
+        for index, instrument_id in enumerate(
+            current_order
+        ):
+            instrument = instrument_by_id[
+                instrument_id
+            ]
+
+            col_name, col_up, col_down = st.columns(
+                [5, 1, 1]
+            )
+
+            with col_name:
+                st.write(
+                    instrument["name"]
+                )
+
+            with col_up:
+                if st.button(
+                    "↑",
+                    disabled=index == 0,
+                    key=(
+                        "sidebar_instrument_order_up_"
+                        f"{instrument_id}"
+                    ),
+                    help="上へ移動",
+                    use_container_width=True,
+                ):
+                    current_order[
+                        index - 1
+                    ], current_order[
+                        index
+                    ] = (
+                        current_order[index],
+                        current_order[index - 1],
+                    )
+
+                    st.session_state[
+                        draft_key
+                    ] = current_order
+
+                    st.rerun()
+
+            with col_down:
+                if st.button(
+                    "↓",
+                    disabled=(
+                        index
+                        == len(
+                            current_order
+                        ) - 1
+                    ),
+                    key=(
+                        "sidebar_instrument_order_down_"
+                        f"{instrument_id}"
+                    ),
+                    help="下へ移動",
+                    use_container_width=True,
+                ):
+                    current_order[
+                        index + 1
+                    ], current_order[
+                        index
+                    ] = (
+                        current_order[index],
+                        current_order[index + 1],
+                    )
+
+                    st.session_state[
+                        draft_key
+                    ] = current_order
+
+                    st.rerun()
+
+        if st.button(
+            "表示順を保存",
+            type="primary",
+            use_container_width=True,
+            key="sidebar_save_instrument_order",
+        ):
+            queue_instrument_order_save(
+                st.session_state[
+                    draft_key
+                ]
+            )
+
+            st.rerun()
+
+        if st.button(
+            "初期順に戻す",
+            use_container_width=True,
+            key="sidebar_reset_instrument_order",
+        ):
+            st.session_state[
+                draft_key
+            ] = default_order.copy()
+
+            queue_instrument_order_reset()
+
+            st.rerun()
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -3474,6 +3618,12 @@ def main() -> None:
     if selected_instrument_id != current_instrument_id:
         change_instrument(selected_instrument_id)
 
+    st.sidebar.divider()
+
+    render_sidebar_instrument_order_settings(
+        base_instruments
+    )
+
     render_mobile_instrument_selector(
         instruments,
         current_instrument_id,
@@ -3510,8 +3660,7 @@ def main() -> None:
         return
 
     render_booking_page(
-        current_instrument_id,
-        base_instruments,
+        current_instrument_id
     )
 
 
