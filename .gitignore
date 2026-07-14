@@ -1,5 +1,6 @@
 .streamlit/secrets.toml
 equipment_booking.db
+.env
 __pycache__/
 *.pyc
 .DS_Store
