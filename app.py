@@ -3,7 +3,8 @@ import hmac
 import html
 import json
 import secrets
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,7 +14,7 @@ from streamlit_js_eval import streamlit_js_eval
 
 
 APP_TITLE = "共通機器予約システム（愛知学院大学薬学部）"
-DB_PATH = "equipment_booking.db"
+DATABASE_URL = st.secrets["DATABASE_URL"]
 
 SYSTEM_ADMIN_USERNAME = "admin"
 SYSTEM_ADMIN_PASSWORD = "1234"
@@ -68,222 +69,55 @@ st.markdown(
 # Database
 # ============================================================
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+Row = dict[str, Any]
 
 
-def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
+class DatabaseConnection:
+    """Small compatibility wrapper for the existing SQL access layer."""
 
-
-def migrate_instrument_managers_schema(conn: sqlite3.Connection) -> None:
-    """Migrate the legacy manager_email schema to the current manager_id schema."""
-    columns = table_columns(conn, "instrument_managers")
-
-    if {"instrument_id", "manager_id"}.issubset(columns):
-        return
-
-    if "manager_email" not in columns:
-        raise RuntimeError(
-            "instrument_managers テーブルの構造を認識できません。"
+    def __init__(self) -> None:
+        self._conn = psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row,
         )
 
-    backup_exists = conn.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'instrument_managers_legacy_email'
-        """
-    ).fetchone()
+    @staticmethod
+    def _convert_placeholders(query: str) -> str:
+        # Existing application SQL uses SQLite-style "?" placeholders.
+        # Psycopg uses "%s". Query strings in this app do not contain literal
+        # question marks, so this conversion is safe for the DB access layer.
+        return query.replace("?", "%s")
 
-    if backup_exists is None:
-        conn.execute(
-            """
-            CREATE TABLE instrument_managers_legacy_email AS
-            SELECT *
-            FROM instrument_managers
-            """
+    def execute(
+        self,
+        query: str,
+        params: tuple[Any, ...] | list[Any] | None = None,
+    ):
+        return self._conn.execute(
+            self._convert_placeholders(query),
+            params,
         )
 
-    conn.execute("DROP TABLE IF EXISTS instrument_managers_new")
+    def __enter__(self) -> "DatabaseConnection":
+        return self
 
-    conn.execute(
-        """
-        CREATE TABLE instrument_managers_new (
-            instrument_id INTEGER NOT NULL,
-            manager_id INTEGER NOT NULL,
-            UNIQUE(instrument_id, manager_id),
-            FOREIGN KEY (instrument_id)
-                REFERENCES instruments(id) ON DELETE CASCADE,
-            FOREIGN KEY (manager_id)
-                REFERENCES manager_accounts(id) ON DELETE CASCADE
-        )
-        """
-    )
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
 
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO instrument_managers_new (
-            instrument_id,
-            manager_id
-        )
-        SELECT
-            legacy.instrument_id,
-            accounts.id
-        FROM instrument_managers legacy
-        JOIN manager_accounts accounts
-            ON lower(accounts.username) = lower(legacy.manager_email)
-        """
-    )
+        self._conn.close()
+        return False
 
-    conn.execute("DROP TABLE instrument_managers")
-    conn.execute(
-        """
-        ALTER TABLE instrument_managers_new
-        RENAME TO instrument_managers
-        """
-    )
+
+def get_connection() -> DatabaseConnection:
+    return DatabaseConnection()
 
 
 def init_db() -> None:
+    """Initialize the admin account row after schema.sql has been applied."""
     with get_connection() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS instruments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                description TEXT NOT NULL DEFAULT '',
-                notice TEXT NOT NULL DEFAULT '',
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS manager_accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS system_admin_credentials (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                username TEXT NOT NULL UNIQUE,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS instrument_managers (
-                instrument_id INTEGER NOT NULL,
-                manager_id INTEGER NOT NULL,
-                UNIQUE(instrument_id, manager_id),
-                FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE,
-                FOREIGN KEY (manager_id)
-                    REFERENCES manager_accounts(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS custom_fields (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                instrument_id INTEGER NOT NULL,
-                field_name TEXT NOT NULL,
-                field_type TEXT NOT NULL,
-                required INTEGER NOT NULL DEFAULT 0,
-                options_json TEXT NOT NULL DEFAULT '[]',
-                display_order INTEGER NOT NULL DEFAULT 0,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS reservations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                instrument_id INTEGER NOT NULL,
-                user_name TEXT NOT NULL,
-                affiliation TEXT NOT NULL,
-                reservation_date TEXT NOT NULL DEFAULT '',
-                start_date TEXT,
-                end_date TEXT,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                purpose TEXT NOT NULL,
-                purpose_other TEXT NOT NULL DEFAULT '',
-                remarks TEXT NOT NULL DEFAULT '',
-                pin_salt TEXT NOT NULL,
-                pin_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS reservation_field_values (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                reservation_id INTEGER NOT NULL,
-                custom_field_id INTEGER,
-                field_name_snapshot TEXT NOT NULL,
-                field_type_snapshot TEXT NOT NULL,
-                value_json TEXT NOT NULL,
-                FOREIGN KEY (reservation_id)
-                    REFERENCES reservations(id) ON DELETE CASCADE,
-                FOREIGN KEY (custom_field_id)
-                    REFERENCES custom_fields(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS blocked_periods (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                instrument_id INTEGER NOT NULL,
-                reservation_date TEXT NOT NULL,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (instrument_id)
-                    REFERENCES instruments(id) ON DELETE CASCADE
-            );
-            """
-        )
-
-        migrate_instrument_managers_schema(conn)
-
-        columns = table_columns(conn, "reservations")
-
-        if "start_date" not in columns:
-            conn.execute("ALTER TABLE reservations ADD COLUMN start_date TEXT")
-        if "end_date" not in columns:
-            conn.execute("ALTER TABLE reservations ADD COLUMN end_date TEXT")
-        if "remarks" not in columns:
-            conn.execute(
-                "ALTER TABLE reservations ADD COLUMN remarks TEXT NOT NULL DEFAULT ''"
-            )
-
-        columns = table_columns(conn, "reservations")
-        if "reservation_date" in columns:
-            conn.execute(
-                """
-                UPDATE reservations
-                SET start_date = reservation_date
-                WHERE start_date IS NULL OR start_date = ''
-                """
-            )
-            conn.execute(
-                """
-                UPDATE reservations
-                SET end_date = reservation_date
-                WHERE end_date IS NULL OR end_date = ''
-                """
-            )
-
         admin_row = conn.execute(
             """
             SELECT id
@@ -294,6 +128,7 @@ def init_db() -> None:
 
         if admin_row is None:
             salt, password_hash = make_hash(SYSTEM_ADMIN_PASSWORD)
+
             conn.execute(
                 """
                 INSERT INTO system_admin_credentials (
@@ -729,22 +564,42 @@ def minutes_to_display(value: int) -> str:
     return f"{value // 60:02d}:{value % 60:02d}"
 
 
-def combine_datetime(target_date: date, target_time: str) -> datetime:
-    hour, minute = map(int, target_time.split(":"))
-    return datetime.combine(target_date, time(hour=hour, minute=minute))
+def as_date(value: date | str) -> date:
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
-def reservation_start_datetime(reservation: sqlite3.Row) -> datetime:
-    return combine_datetime(
-        date.fromisoformat(reservation["start_date"]),
-        reservation["start_time"],
+def as_time_text(value: time | str) -> str:
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    return str(value)[:5]
+
+
+def combine_datetime(
+    target_date: date | str,
+    target_time: time | str,
+) -> datetime:
+    normalized_date = as_date(target_date)
+    normalized_time = as_time_text(target_time)
+    hour, minute = map(int, normalized_time.split(":"))
+    return datetime.combine(
+        normalized_date,
+        time(hour=hour, minute=minute),
     )
 
 
-def reservation_end_datetime(reservation: sqlite3.Row) -> datetime:
+def reservation_start_datetime(reservation: Row) -> datetime:
     return combine_datetime(
-        date.fromisoformat(reservation["end_date"]),
-        reservation["end_time"],
+        as_date(reservation["start_date"]),
+        as_time_text(reservation["start_time"]),
+    )
+
+
+def reservation_end_datetime(reservation: Row) -> datetime:
+    return combine_datetime(
+        as_date(reservation["end_date"]),
+        as_time_text(reservation["end_time"]),
     )
 
 
@@ -757,12 +612,12 @@ def format_japanese_date(target_date: date) -> str:
     return f"{target_date.month}/{target_date.day}（{weekdays[target_date.weekday()]}）"
 
 
-def format_reservation_period(reservation: sqlite3.Row) -> str:
-    start_date_value = date.fromisoformat(reservation["start_date"])
-    end_date_value = date.fromisoformat(reservation["end_date"])
+def format_reservation_period(reservation: Row) -> str:
+    start_date_value = as_date(reservation["start_date"])
+    end_date_value = as_date(reservation["end_date"])
     return (
-        f"{start_date_value.strftime('%Y/%m/%d')} {reservation['start_time']} ～ "
-        f"{end_date_value.strftime('%Y/%m/%d')} {reservation['end_time']}"
+        f"{start_date_value.strftime('%Y/%m/%d')} {as_time_text(reservation['start_time'])} ～ "
+        f"{end_date_value.strftime('%Y/%m/%d')} {as_time_text(reservation['end_time'])}"
     )
 
 
@@ -779,17 +634,17 @@ def intervals_overlap(
 # Instruments
 # ============================================================
 
-def get_instruments(active_only: bool = True) -> list[sqlite3.Row]:
+def get_instruments(active_only: bool = True) -> list[Row]:
     query = "SELECT * FROM instruments"
     if active_only:
-        query += " WHERE active = 1"
+        query += " WHERE active = TRUE"
     query += " ORDER BY name"
 
     with get_connection() as conn:
         return conn.execute(query).fetchall()
 
 
-def get_instrument(instrument_id: int) -> sqlite3.Row | None:
+def get_instrument(instrument_id: int) -> Row | None:
     with get_connection() as conn:
         return conn.execute(
             "SELECT * FROM instruments WHERE id = ?",
@@ -809,20 +664,20 @@ def delete_instrument(instrument_id: int) -> None:
 # Custom fields
 # ============================================================
 
-def get_custom_fields(instrument_id: int) -> list[sqlite3.Row]:
+def get_custom_fields(instrument_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
             SELECT *
             FROM custom_fields
-            WHERE instrument_id = ? AND active = 1
+            WHERE instrument_id = ? AND active = TRUE
             ORDER BY display_order, id
             """,
             (instrument_id,),
         ).fetchall()
 
 
-def get_reservation_field_values(reservation_id: int) -> list[sqlite3.Row]:
+def get_reservation_field_values(reservation_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -847,7 +702,7 @@ def get_reservation_field_value_map(reservation_id: int) -> dict[int, Any]:
 # Blocked periods
 # ============================================================
 
-def get_blocked_periods(instrument_id: int) -> list[sqlite3.Row]:
+def get_blocked_periods(instrument_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -864,7 +719,7 @@ def get_blocked_periods_for_range(
     instrument_id: int,
     range_start: date,
     range_end: date,
-) -> list[sqlite3.Row]:
+) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -878,8 +733,8 @@ def get_blocked_periods_for_range(
             """,
             (
                 instrument_id,
-                range_start.isoformat(),
-                range_end.isoformat(),
+                range_start,
+                range_end,
             ),
         ).fetchall()
 
@@ -888,7 +743,7 @@ def get_blocked_periods_for_range(
 # Reservations
 # ============================================================
 
-def get_reservation(reservation_id: int) -> sqlite3.Row | None:
+def get_reservation(reservation_id: int) -> Row | None:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -901,7 +756,7 @@ def get_reservation(reservation_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def get_reservations(instrument_id: int) -> list[sqlite3.Row]:
+def get_reservations(instrument_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -919,7 +774,7 @@ def get_reservations_for_range(
     instrument_id: int,
     range_start: date,
     range_end: date,
-) -> list[sqlite3.Row]:
+) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
             """
@@ -934,8 +789,8 @@ def get_reservations_for_range(
             """,
             (
                 instrument_id,
-                range_end.isoformat(),
-                range_start.isoformat(),
+                range_end,
+                range_start,
             ),
         ).fetchall()
 
@@ -962,7 +817,7 @@ def reservation_has_conflict(
             return True, "指定した期間には既に予約があります。"
 
     for blocked in get_blocked_periods(instrument_id):
-        blocked_date = date.fromisoformat(blocked["reservation_date"])
+        blocked_date = as_date(blocked["reservation_date"])
         blocked_start = combine_datetime(blocked_date, blocked["start_time"])
         blocked_end = combine_datetime(blocked_date, blocked["end_time"])
 
@@ -976,7 +831,7 @@ def reservation_has_conflict(
 
 
 def save_reservation_field_values(
-    conn: sqlite3.Connection,
+    conn: DatabaseConnection,
     reservation_id: int,
     instrument_id: int,
     custom_values: dict[int, Any],
@@ -1040,7 +895,6 @@ def add_reservation(
                 instrument_id,
                 user_name,
                 affiliation,
-                reservation_date,
                 start_date,
                 end_date,
                 start_time,
@@ -1051,15 +905,15 @@ def add_reservation(
                 pin_salt,
                 pin_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 instrument_id,
                 user_name.strip(),
                 affiliation.strip(),
-                start_date.isoformat(),
-                start_date.isoformat(),
-                end_date.isoformat(),
+                start_date,
+                end_date,
                 start_time,
                 end_time,
                 purpose,
@@ -1070,7 +924,10 @@ def add_reservation(
             ),
         )
 
-        reservation_id = int(cursor.lastrowid)
+        inserted = cursor.fetchone()
+        if inserted is None:
+            raise RuntimeError("予約IDを取得できませんでした。")
+        reservation_id = int(inserted["id"])
 
         save_reservation_field_values(
             conn,
@@ -1108,7 +965,6 @@ def update_reservation(
             SET
                 user_name = ?,
                 affiliation = ?,
-                reservation_date = ?,
                 start_date = ?,
                 end_date = ?,
                 start_time = ?,
@@ -1121,9 +977,8 @@ def update_reservation(
             (
                 user_name.strip(),
                 affiliation.strip(),
-                start_date.isoformat(),
-                start_date.isoformat(),
-                end_date.isoformat(),
+                start_date,
+                end_date,
                 start_time,
                 end_time,
                 purpose,
@@ -1192,7 +1047,7 @@ def authenticate(username: str, password: str) -> bool:
             """
             SELECT *
             FROM manager_accounts
-            WHERE username = ? AND active = 1
+            WHERE username = ? AND active = TRUE
             """,
             (username,),
         ).fetchone()
@@ -1366,14 +1221,14 @@ def manageable_instrument_ids() -> list[int]:
 # Display helpers
 # ============================================================
 
-def purpose_label(reservation: sqlite3.Row) -> str:
+def purpose_label(reservation: Row) -> str:
     if reservation["purpose"] == "その他":
         detail = reservation["purpose_other"].strip()
         return f"その他（{detail}）" if detail else "その他"
     return reservation["purpose"]
 
 
-def field_value_is_empty(field: sqlite3.Row, value: Any) -> bool:
+def field_value_is_empty(field: Row, value: Any) -> bool:
     if field["field_type"] == "checkbox":
         return value is False
     if field["field_type"] == "multiselect":
@@ -1386,7 +1241,7 @@ def field_value_is_empty(field: sqlite3.Row, value: Any) -> bool:
 
 
 def render_custom_field(
-    field: sqlite3.Row,
+    field: Row,
     key_prefix: str,
     default_value: Any = None,
 ) -> Any:
@@ -1465,7 +1320,7 @@ def display_custom_value(value: Any) -> str:
 # ============================================================
 
 def reservation_segment_for_date(
-    reservation: sqlite3.Row,
+    reservation: Row,
     target_date: date,
 ) -> tuple[int, int] | None:
     reservation_start = reservation_start_datetime(reservation)
@@ -1486,8 +1341,8 @@ def reservation_segment_for_date(
 
 def build_calendar_html(
     dates: list[date],
-    reservations: list[sqlite3.Row],
-    blocked_periods: list[sqlite3.Row],
+    reservations: list[Row],
+    blocked_periods: list[Row],
     instrument_id: int,
     compact_mode: bool,
 ) -> str:
@@ -1709,13 +1564,13 @@ def build_calendar_html(
             )
 
     for blocked in blocked_periods:
-        blocked_date = date.fromisoformat(blocked["reservation_date"])
+        blocked_date = as_date(blocked["reservation_date"])
         if blocked_date not in dates:
             continue
 
         day_index = dates.index(blocked_date)
-        start_slot = to_minutes(blocked["start_time"]) // SLOT_MINUTES
-        end_slot = to_minutes(blocked["end_time"]) // SLOT_MINUTES
+        start_slot = to_minutes(as_time_text(blocked["start_time"])) // SLOT_MINUTES
+        end_slot = to_minutes(as_time_text(blocked["end_time"])) // SLOT_MINUTES
         span = max(1, end_slot - start_slot)
         grid_column = day_index + 2
         grid_row = start_slot + 2
@@ -1736,8 +1591,8 @@ def build_calendar_html(
 
 def render_calendar(
     dates: list[date],
-    reservations: list[sqlite3.Row],
-    blocked_periods: list[sqlite3.Row],
+    reservations: list[Row],
+    blocked_periods: list[Row],
     instrument_id: int,
     compact_mode: bool,
 ) -> None:
@@ -2059,7 +1914,7 @@ def render_new_reservation_page(instrument_id: int) -> None:
 # ============================================================
 
 def process_reservation_delete(
-    reservation: sqlite3.Row,
+    reservation: Row,
     pin: str,
     instrument_id: int,
 ) -> None:
@@ -2221,8 +2076,8 @@ def render_edit_reservation_page(
         key=f"edit_affiliation_{reservation_id}",
     )
 
-    start_date_initial = date.fromisoformat(reservation["start_date"])
-    end_date_initial = date.fromisoformat(reservation["end_date"])
+    start_date_initial = as_date(reservation["start_date"])
+    end_date_initial = as_date(reservation["end_date"])
 
     if mobile:
         start_date_value = st.date_input(
@@ -2234,7 +2089,7 @@ def render_edit_reservation_page(
         start_time_value = st.selectbox(
             "開始時刻 *",
             TIME_OPTIONS,
-            index=TIME_OPTIONS.index(reservation["start_time"]),
+            index=TIME_OPTIONS.index(as_time_text(reservation["start_time"])),
             key=f"edit_start_time_{reservation_id}",
         )
         end_date_value = st.date_input(
@@ -2246,7 +2101,7 @@ def render_edit_reservation_page(
         end_time_value = st.selectbox(
             "終了時刻 *",
             TIME_OPTIONS,
-            index=TIME_OPTIONS.index(reservation["end_time"]),
+            index=TIME_OPTIONS.index(as_time_text(reservation["end_time"])),
             key=f"edit_end_time_{reservation_id}",
         )
     else:
@@ -2273,14 +2128,14 @@ def render_edit_reservation_page(
             start_time_value = st.selectbox(
                 "開始時刻 *",
                 TIME_OPTIONS,
-                index=TIME_OPTIONS.index(reservation["start_time"]),
+                index=TIME_OPTIONS.index(as_time_text(reservation["start_time"])),
                 key=f"edit_start_time_{reservation_id}",
             )
         with col2:
             end_time_value = st.selectbox(
                 "終了時刻 *",
                 TIME_OPTIONS,
-                index=TIME_OPTIONS.index(reservation["end_time"]),
+                index=TIME_OPTIONS.index(as_time_text(reservation["end_time"])),
                 key=f"edit_end_time_{reservation_id}",
             )
 
@@ -2385,7 +2240,7 @@ def render_edit_reservation_page(
 # ============================================================
 
 def normalize_instrument_order(
-    instruments: list[sqlite3.Row],
+    instruments: list[Row],
     saved_order: list[int] | None = None,
 ) -> list[int]:
     available_ids = [
@@ -2421,8 +2276,8 @@ def normalize_instrument_order(
 
 
 def sort_instruments_for_browser(
-    instruments: list[sqlite3.Row],
-) -> list[sqlite3.Row]:
+    instruments: list[Row],
+) -> list[Row]:
     order = normalize_instrument_order(
         instruments
     )
@@ -2443,7 +2298,7 @@ def sort_instruments_for_browser(
 
 
 def render_instrument_order_settings(
-    instruments: list[sqlite3.Row],
+    instruments: list[Row],
 ) -> None:
     default_order = [
         instrument["id"]
@@ -2767,7 +2622,7 @@ def admin_instrument_management() -> None:
                         ),
                     )
                 st.rerun()
-            except sqlite3.IntegrityError:
+            except psycopg.IntegrityError:
                 st.error("同名の機器が既に登録されています。")
 
     for instrument in get_instruments(active_only=False):
@@ -2816,12 +2671,12 @@ def admin_instrument_management() -> None:
                                 new_name.strip(),
                                 description.strip(),
                                 notice.strip(),
-                                int(active),
+                                bool(active),
                                 instrument["id"],
                             ),
                         )
                     st.rerun()
-                except sqlite3.IntegrityError:
+                except psycopg.IntegrityError:
                     st.error("同名の機器が既に登録されています。")
 
             st.markdown("#### 機器削除")
@@ -2879,7 +2734,7 @@ def admin_manager_management() -> None:
                         ),
                     )
                 st.rerun()
-            except sqlite3.IntegrityError:
+            except psycopg.IntegrityError:
                 st.error("同じユーザー名が既に存在します。")
 
     with get_connection() as conn:
@@ -2938,7 +2793,7 @@ def admin_manager_management() -> None:
                             ),
                         )
                     st.rerun()
-                except sqlite3.IntegrityError:
+                except psycopg.IntegrityError:
                     st.error("既に割り当て済みです。")
 
     st.markdown("### 登録済み機器管理者")
@@ -3027,7 +2882,7 @@ def admin_manager_management() -> None:
                         WHERE id = ?
                         """,
                         (
-                            int(active),
+                            bool(active),
                             manager["id"],
                         ),
                     )
@@ -3144,7 +2999,7 @@ def custom_field_management(instrument_id: int) -> None:
                         instrument_id,
                         field_name.strip(),
                         field_type,
-                        int(required),
+                        bool(required),
                         json.dumps(options, ensure_ascii=False),
                         row["max_order"] + 1,
                     ),
@@ -3174,7 +3029,7 @@ def custom_field_management(instrument_id: int) -> None:
                     conn.execute(
                         """
                         UPDATE custom_fields
-                        SET active = 0
+                        SET active = FALSE
                         WHERE id = ?
                         """,
                         (field["id"],),
@@ -3241,7 +3096,7 @@ def blocked_period_management(instrument_id: int) -> None:
                         """,
                         (
                             instrument_id,
-                            blocked_date.isoformat(),
+                            blocked_date,
                             start_time_value,
                             end_time_value,
                             reason.strip(),
@@ -3260,7 +3115,7 @@ def blocked_period_management(instrument_id: int) -> None:
         with col1:
             label = (
                 f"{blocked['reservation_date']} "
-                f"{blocked['start_time']}～{blocked['end_time']}"
+                f"{as_time_text(blocked['start_time'])}～{as_time_text(blocked['end_time'])}"
             )
 
             if blocked["reason"]:
@@ -3465,7 +3320,7 @@ def page_management() -> None:
 # Instrument selection
 # ============================================================
 
-def resolve_instrument_id(instruments: list[sqlite3.Row]) -> int:
+def resolve_instrument_id(instruments: list[Row]) -> int:
     instrument_ids = [
         instrument["id"]
         for instrument in instruments
@@ -3497,7 +3352,7 @@ def change_instrument(instrument_id: int) -> None:
 
 
 def render_sidebar_instrument_order_settings(
-    instruments: list[sqlite3.Row],
+    instruments: list[Row],
 ) -> None:
     with st.sidebar.expander(
         "機器表示順"
@@ -3647,7 +3502,7 @@ def render_sidebar_instrument_order_settings(
             st.rerun()
 
 def render_mobile_instrument_selector(
-    instruments: list[sqlite3.Row],
+    instruments: list[Row],
     current_instrument_id: int,
 ) -> None:
     if not is_mobile_device():
