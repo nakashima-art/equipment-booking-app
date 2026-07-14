@@ -60,7 +60,25 @@ st.markdown(
         white-space: nowrap;
         pointer-events: none;
     }
-    </style>
+    
+    /* 戻るボタン専用：青系 */
+    .st-key-blue_back_button button {
+        background: #eef5ff !important;
+        border: 1.5px solid #2f6fed !important;
+        color: #2459c4 !important;
+        font-weight: 700 !important;
+    }
+
+    .st-key-blue_back_button button:hover {
+        background: #dceaff !important;
+        border-color: #2459c4 !important;
+        color: #1f4da8 !important;
+    }
+
+    .st-key-blue_back_button button:focus {
+        box-shadow: 0 0 0 0.2rem rgba(47, 111, 237, 0.20) !important;
+    }
+</style>
     """,
     unsafe_allow_html=True,
 )
@@ -1879,13 +1897,13 @@ def render_new_reservation_page(instrument_id: int) -> None:
     st.header(instrument["name"])
     st.subheader("新規予約")
 
-    if st.button(
-        "⬅ 予約状況に戻る",
-        type="primary",
-        use_container_width=True,
-        key=f"back_to_booking_from_new_{instrument_id}",
-    ):
-        open_booking_view(instrument_id)
+    with st.container(key="blue_back_button"):
+        if st.button(
+            "⬅ 予約状況に戻る",
+            use_container_width=True,
+            key=f"back_to_booking_from_new_{instrument_id}",
+        ):
+            open_booking_view(instrument_id)
 
     if instrument["description"]:
         st.caption(instrument["description"])
@@ -2099,13 +2117,13 @@ def render_reservation_detail_page(
     st.header(reservation["instrument_name"])
     st.subheader("予約詳細")
 
-    if st.button(
-        "⬅ 予約状況に戻る",
-        type="primary",
-        use_container_width=True,
-        key=f"back_to_booking_from_detail_{reservation_id}",
-    ):
-        open_booking_view(instrument_id)
+    with st.container(key="blue_back_button"):
+        if st.button(
+            "⬅ 予約状況に戻る",
+            use_container_width=True,
+            key=f"back_to_booking_from_detail_{reservation_id}",
+        ):
+            open_booking_view(instrument_id)
 
     with st.container(border=True):
         st.write(f"**予約者：** {reservation['user_name']}")
@@ -2209,13 +2227,13 @@ def render_edit_reservation_page(
     st.header(reservation["instrument_name"])
     st.subheader("予約編集")
 
-    if st.button(
-        "⬅ 予約詳細に戻る",
-        type="primary",
-        use_container_width=True,
-        key=f"back_to_detail_from_edit_{reservation_id}",
-    ):
-        open_reservation_detail_view(instrument_id, reservation_id)
+    with st.container(key="blue_back_button"):
+        if st.button(
+            "⬅ 予約詳細に戻る",
+            use_container_width=True,
+            key=f"back_to_detail_from_edit_{reservation_id}",
+        ):
+            open_reservation_detail_view(instrument_id, reservation_id)
 
     field_values = get_reservation_field_value_map(reservation_id)
     fields = get_custom_fields(instrument_id)
@@ -2653,10 +2671,10 @@ def render_booking_calendar_fragment(
             )
 
     if view_mode == "週間":
-        start_date_value = get_week_start(selected_date)
-        end_date_value = start_date_value + timedelta(days=6)
+        start_date_value = selected_date
+        end_date_value = selected_date + timedelta(days=6)
         dates = [
-            start_date_value + timedelta(days=index)
+            selected_date + timedelta(days=index)
             for index in range(7)
         ]
     else:
