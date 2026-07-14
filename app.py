@@ -103,6 +103,7 @@ class DatabaseConnection:
     def __init__(self) -> None:
         self._connection_context = None
         self._conn = None
+        self._mutated = False
 
     @staticmethod
     def _convert_placeholders(query: str) -> str:
@@ -123,22 +124,44 @@ class DatabaseConnection:
                 "DatabaseConnection must be used inside a with block."
             )
 
-        return self._conn.execute(
-            self._convert_placeholders(query),
+        converted_query = self._convert_placeholders(query)
+        cursor = self._conn.execute(
+            converted_query,
             params,
         )
+
+        first_keyword = (
+            converted_query.lstrip().split(None, 1)[0].upper()
+            if converted_query.strip()
+            else ""
+        )
+        if first_keyword in {
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "ALTER",
+            "CREATE",
+            "DROP",
+        }:
+            self._mutated = True
+
+        return cursor
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
         if self._connection_context is None:
             return False
 
-        return bool(
-            self._connection_context.__exit__(
-                exc_type,
-                exc_value,
-                traceback,
-            )
+        result = self._connection_context.__exit__(
+            exc_type,
+            exc_value,
+            traceback,
         )
+
+        if exc_type is None and self._mutated:
+            clear_read_caches()
+
+        return bool(result)
 
 
 def get_connection() -> DatabaseConnection:
@@ -672,6 +695,7 @@ def intervals_overlap(
 # Instruments
 # ============================================================
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_instruments(active_only: bool = True) -> list[Row]:
     query = "SELECT * FROM instruments"
     if active_only:
@@ -682,6 +706,7 @@ def get_instruments(active_only: bool = True) -> list[Row]:
         return conn.execute(query).fetchall()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_instrument(instrument_id: int) -> Row | None:
     with get_connection() as conn:
         return conn.execute(
@@ -702,6 +727,7 @@ def delete_instrument(instrument_id: int) -> None:
 # Custom fields
 # ============================================================
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_custom_fields(instrument_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
@@ -715,6 +741,7 @@ def get_custom_fields(instrument_id: int) -> list[Row]:
         ).fetchall()
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def get_reservation_field_values(reservation_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
@@ -740,6 +767,7 @@ def get_reservation_field_value_map(reservation_id: int) -> dict[int, Any]:
 # Blocked periods
 # ============================================================
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_blocked_periods(instrument_id: int) -> list[Row]:
     with get_connection() as conn:
         return conn.execute(
@@ -753,6 +781,7 @@ def get_blocked_periods(instrument_id: int) -> list[Row]:
         ).fetchall()
 
 
+@st.cache_data(ttl=5, show_spinner=False)
 def get_blocked_periods_for_range(
     instrument_id: int,
     range_start: date,
@@ -781,6 +810,7 @@ def get_blocked_periods_for_range(
 # Reservations
 # ============================================================
 
+@st.cache_data(ttl=5, show_spinner=False)
 def get_reservation(reservation_id: int) -> Row | None:
     with get_connection() as conn:
         return conn.execute(
@@ -808,6 +838,7 @@ def get_reservations(instrument_id: int) -> list[Row]:
         ).fetchall()
 
 
+@st.cache_data(ttl=5, show_spinner=False)
 def get_reservations_for_range(
     instrument_id: int,
     range_start: date,
@@ -833,6 +864,7 @@ def get_reservations_for_range(
         ).fetchall()
 
 
+@st.cache_data(ttl=3, show_spinner=False)
 def get_calendar_data(
     instrument_id: int,
     range_start: date,
@@ -1272,6 +1304,7 @@ def render_own_password_change() -> None:
                 st.success("パスワードを変更しました。")
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def get_managed_instrument_ids(manager_id: int) -> list[int]:
     with get_connection() as conn:
         rows = conn.execute(
@@ -1284,6 +1317,20 @@ def get_managed_instrument_ids(manager_id: int) -> list[int]:
         ).fetchall()
 
     return [row["instrument_id"] for row in rows]
+
+
+def clear_read_caches() -> None:
+    """Clear cached database reads after a successful write transaction."""
+    get_instruments.clear()
+    get_instrument.clear()
+    get_custom_fields.clear()
+    get_reservation_field_values.clear()
+    get_blocked_periods.clear()
+    get_blocked_periods_for_range.clear()
+    get_reservation.clear()
+    get_reservations_for_range.clear()
+    get_calendar_data.clear()
+    get_managed_instrument_ids.clear()
 
 
 def manageable_instrument_ids() -> list[int]:
@@ -3363,29 +3410,39 @@ def page_management() -> None:
                 "機器管理者",
                 "担当機器設定",
                 "予約管理",
-            ]
+            ],
+            key="system_admin_management_tabs",
+            on_change="rerun",
         )
 
-        with tabs[0]:
-            admin_instrument_management()
-        with tabs[1]:
-            admin_manager_management()
-        with tabs[2]:
-            manager_instrument_settings()
-        with tabs[3]:
-            manager_reservation_management()
+        if tabs[0].open:
+            with tabs[0]:
+                admin_instrument_management()
+        elif tabs[1].open:
+            with tabs[1]:
+                admin_manager_management()
+        elif tabs[2].open:
+            with tabs[2]:
+                manager_instrument_settings()
+        elif tabs[3].open:
+            with tabs[3]:
+                manager_reservation_management()
     else:
         tabs = st.tabs(
             [
                 "担当機器設定",
                 "予約管理",
-            ]
+            ],
+            key="equipment_manager_tabs",
+            on_change="rerun",
         )
 
-        with tabs[0]:
-            manager_instrument_settings()
-        with tabs[1]:
-            manager_reservation_management()
+        if tabs[0].open:
+            with tabs[0]:
+                manager_instrument_settings()
+        elif tabs[1].open:
+            with tabs[1]:
+                manager_reservation_management()
 
 
 # ============================================================
