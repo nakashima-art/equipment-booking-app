@@ -1626,6 +1626,23 @@ def build_calendar_html(
         overflow: hidden;
         line-height: 1.2;
     }}
+    .current-time-line {{
+        z-index: 9;
+        height: 0;
+        border-top: 2px solid #ef4444;
+        pointer-events: none;
+        position: relative;
+    }}
+    .current-time-line::before {{
+        content: "";
+        position: absolute;
+        left: -4px;
+        top: -5px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ef4444;
+    }}
     .name {{font-weight: 600; font-size: 12px;}}
     .small {{font-size: 10px;}}
     </style>
@@ -1678,6 +1695,24 @@ def build_calendar_html(
                     f'<div class="cell{hour_class}" '
                     f'style="grid-column:{grid_column};grid-row:{grid_row};"></div>'
                 )
+
+    today = now.date()
+    if today in dates:
+        today_index = dates.index(today)
+        current_minutes = now.hour * 60 + now.minute + now.second / 60
+        current_slot = int(current_minutes // SLOT_MINUTES)
+        current_slot = min(current_slot, slot_count - 1)
+        minute_offset = current_minutes - current_slot * SLOT_MINUTES
+        offset_pixels = minute_offset / SLOT_MINUTES * SLOT_HEIGHT
+        grid_column = today_index + 2
+        grid_row = current_slot + 2
+
+        content.append(
+            f'<div class="current-time-line" '
+            f'style="grid-column:{grid_column};'
+            f'grid-row:{grid_row};'
+            f'transform:translateY({offset_pixels:.2f}px);"></div>'
+        )
 
     for reservation in reservations:
         for day_index, target_date in enumerate(dates):
