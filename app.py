@@ -114,6 +114,13 @@ class DatabaseConnection:
         self._conn = self._connection_context.__enter__()
         return self
 
+    def pipeline(self):
+        if self._conn is None:
+            raise RuntimeError(
+                "DatabaseConnection must be used inside a with block."
+            )
+        return self._conn.pipeline()
+
     def execute(
         self,
         query: str,
@@ -870,42 +877,46 @@ def get_calendar_data(
     range_start: date,
     range_end: date,
 ) -> tuple[list[Row], list[Row]]:
-    """Load calendar rows while borrowing one pooled connection."""
+    """Load calendar rows with one pooled connection and one pipeline batch."""
     with get_connection() as conn:
-        reservations = conn.execute(
-            """
-            SELECT r.*, i.name AS instrument_name
-            FROM reservations r
-            JOIN instruments i ON i.id = r.instrument_id
-            WHERE
-                r.instrument_id = ?
-                AND r.start_date <= ?
-                AND r.end_date >= ?
-            ORDER BY r.start_date, r.start_time
-            """,
-            (
-                instrument_id,
-                range_end,
-                range_start,
-            ),
-        ).fetchall()
+        with conn.pipeline():
+            reservation_cursor = conn.execute(
+                """
+                SELECT r.*, i.name AS instrument_name
+                FROM reservations r
+                JOIN instruments i ON i.id = r.instrument_id
+                WHERE
+                    r.instrument_id = ?
+                    AND r.start_date <= ?
+                    AND r.end_date >= ?
+                ORDER BY r.start_date, r.start_time
+                """,
+                (
+                    instrument_id,
+                    range_end,
+                    range_start,
+                ),
+            )
 
-        blocked_periods = conn.execute(
-            """
-            SELECT *
-            FROM blocked_periods
-            WHERE
-                instrument_id = ?
-                AND reservation_date >= ?
-                AND reservation_date <= ?
-            ORDER BY reservation_date, start_time
-            """,
-            (
-                instrument_id,
-                range_start,
-                range_end,
-            ),
-        ).fetchall()
+            blocked_cursor = conn.execute(
+                """
+                SELECT *
+                FROM blocked_periods
+                WHERE
+                    instrument_id = ?
+                    AND reservation_date >= ?
+                    AND reservation_date <= ?
+                ORDER BY reservation_date, start_time
+                """,
+                (
+                    instrument_id,
+                    range_start,
+                    range_end,
+                ),
+            )
+
+        reservations = reservation_cursor.fetchall()
+        blocked_periods = blocked_cursor.fetchall()
 
     return reservations, blocked_periods
 
@@ -1868,7 +1879,12 @@ def render_new_reservation_page(instrument_id: int) -> None:
     st.header(instrument["name"])
     st.subheader("新規予約")
 
-    if st.button("← 予約状況に戻る", use_container_width=mobile):
+    if st.button(
+        "⬅ 予約状況に戻る",
+        type="primary",
+        use_container_width=True,
+        key=f"back_to_booking_from_new_{instrument_id}",
+    ):
         open_booking_view(instrument_id)
 
     if instrument["description"]:
@@ -2083,7 +2099,12 @@ def render_reservation_detail_page(
     st.header(reservation["instrument_name"])
     st.subheader("予約詳細")
 
-    if st.button("← 予約状況に戻る", use_container_width=mobile):
+    if st.button(
+        "⬅ 予約状況に戻る",
+        type="primary",
+        use_container_width=True,
+        key=f"back_to_booking_from_detail_{reservation_id}",
+    ):
         open_booking_view(instrument_id)
 
     with st.container(border=True):
@@ -2188,7 +2209,12 @@ def render_edit_reservation_page(
     st.header(reservation["instrument_name"])
     st.subheader("予約編集")
 
-    if st.button("← 予約詳細に戻る", use_container_width=mobile):
+    if st.button(
+        "⬅ 予約詳細に戻る",
+        type="primary",
+        use_container_width=True,
+        key=f"back_to_detail_from_edit_{reservation_id}",
+    ):
         open_reservation_detail_view(instrument_id, reservation_id)
 
     field_values = get_reservation_field_value_map(reservation_id)
@@ -2586,25 +2612,11 @@ def render_instrument_order_settings(
 # Booking page
 # ============================================================
 
-def render_booking_page(
+@st.fragment
+def render_booking_calendar_fragment(
     instrument_id: int,
-    instrument: Row,
+    mobile: bool,
 ) -> None:
-    mobile = is_mobile_device()
-
-    st.header(instrument["name"])
-
-    if instrument["notice"]:
-        st.info(instrument["notice"])
-
-    if st.button(
-        "＋ 新規予約",
-        type="primary",
-        use_container_width=mobile,
-        key=f"new_reservation_button_{instrument_id}",
-    ):
-        open_new_reservation_view(instrument_id)
-
     default_view_index = 1 if mobile else 0
 
     if mobile:
@@ -2668,6 +2680,31 @@ def render_booking_page(
         blocked_periods,
         instrument_id,
         compact_mode=mobile and view_mode == "週間",
+    )
+
+
+def render_booking_page(
+    instrument_id: int,
+    instrument: Row,
+) -> None:
+    mobile = is_mobile_device()
+
+    st.header(instrument["name"])
+
+    if instrument["notice"]:
+        st.info(instrument["notice"])
+
+    if st.button(
+        "＋ 新規予約",
+        type="primary",
+        use_container_width=mobile,
+        key=f"new_reservation_button_{instrument_id}",
+    ):
+        open_new_reservation_view(instrument_id)
+
+    render_booking_calendar_fragment(
+        instrument_id,
+        mobile,
     )
 
     st.divider()
