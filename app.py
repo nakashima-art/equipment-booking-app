@@ -5,6 +5,7 @@ import json
 import secrets
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -72,51 +73,81 @@ st.markdown(
 Row = dict[str, Any]
 
 
+@st.cache_resource
+def get_db_pool() -> ConnectionPool:
+    """
+    Keep a small client-side connection pool for the Streamlit process.
+
+    min_size=0 allows all client connections to close after inactivity so the
+    Neon compute can still return to scale-to-zero. During active use, existing
+    connections are reused and repeated TLS/PostgreSQL setup is avoided.
+    """
+    return ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=0,
+        max_size=4,
+        max_idle=60.0,
+        timeout=15.0,
+        kwargs={
+            "row_factory": dict_row,
+            "connect_timeout": 10,
+        },
+        open=True,
+        name="equipment-booking",
+    )
+
+
 class DatabaseConnection:
-    """Small compatibility wrapper for the existing SQL access layer."""
+    """Compatibility wrapper around a pooled Psycopg connection."""
 
     def __init__(self) -> None:
-        self._conn = psycopg.connect(
-            DATABASE_URL,
-            row_factory=dict_row,
-        )
+        self._connection_context = None
+        self._conn = None
 
     @staticmethod
     def _convert_placeholders(query: str) -> str:
-        # Existing application SQL uses SQLite-style "?" placeholders.
-        # Psycopg uses "%s". Query strings in this app do not contain literal
-        # question marks, so this conversion is safe for the DB access layer.
         return query.replace("?", "%s")
+
+    def __enter__(self) -> "DatabaseConnection":
+        self._connection_context = get_db_pool().connection()
+        self._conn = self._connection_context.__enter__()
+        return self
 
     def execute(
         self,
         query: str,
         params: tuple[Any, ...] | list[Any] | None = None,
     ):
+        if self._conn is None:
+            raise RuntimeError(
+                "DatabaseConnection must be used inside a with block."
+            )
+
         return self._conn.execute(
             self._convert_placeholders(query),
             params,
         )
 
-    def __enter__(self) -> "DatabaseConnection":
-        return self
-
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        if exc_type is None:
-            self._conn.commit()
-        else:
-            self._conn.rollback()
+        if self._connection_context is None:
+            return False
 
-        self._conn.close()
-        return False
+        return bool(
+            self._connection_context.__exit__(
+                exc_type,
+                exc_value,
+                traceback,
+            )
+        )
 
 
 def get_connection() -> DatabaseConnection:
     return DatabaseConnection()
 
 
-def init_db() -> None:
-    """Initialize the admin account row after schema.sql has been applied."""
+@st.cache_resource
+def initialize_database_once() -> bool:
+    """Ensure the initial system-admin row exists once per Streamlit process."""
     with get_connection() as conn:
         admin_row = conn.execute(
             """
@@ -138,6 +169,7 @@ def init_db() -> None:
                     password_hash
                 )
                 VALUES (1, ?, ?, ?)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (
                     SYSTEM_ADMIN_USERNAME,
@@ -145,6 +177,12 @@ def init_db() -> None:
                     password_hash,
                 ),
             )
+
+    return True
+
+
+def init_db() -> None:
+    initialize_database_once()
 
 
 # ============================================================
@@ -793,6 +831,51 @@ def get_reservations_for_range(
                 range_start,
             ),
         ).fetchall()
+
+
+def get_calendar_data(
+    instrument_id: int,
+    range_start: date,
+    range_end: date,
+) -> tuple[list[Row], list[Row]]:
+    """Load calendar rows while borrowing one pooled connection."""
+    with get_connection() as conn:
+        reservations = conn.execute(
+            """
+            SELECT r.*, i.name AS instrument_name
+            FROM reservations r
+            JOIN instruments i ON i.id = r.instrument_id
+            WHERE
+                r.instrument_id = ?
+                AND r.start_date <= ?
+                AND r.end_date >= ?
+            ORDER BY r.start_date, r.start_time
+            """,
+            (
+                instrument_id,
+                range_end,
+                range_start,
+            ),
+        ).fetchall()
+
+        blocked_periods = conn.execute(
+            """
+            SELECT *
+            FROM blocked_periods
+            WHERE
+                instrument_id = ?
+                AND reservation_date >= ?
+                AND reservation_date <= ?
+            ORDER BY reservation_date, start_time
+            """,
+            (
+                instrument_id,
+                range_start,
+                range_end,
+            ),
+        ).fetchall()
+
+    return reservations, blocked_periods
 
 
 def reservation_has_conflict(
@@ -2458,13 +2541,8 @@ def render_instrument_order_settings(
 
 def render_booking_page(
     instrument_id: int,
+    instrument: Row,
 ) -> None:
-    instrument = get_instrument(instrument_id)
-
-    if instrument is None:
-        st.error("機器が見つかりません。")
-        return
-
     mobile = is_mobile_device()
 
     st.header(instrument["name"])
@@ -2527,13 +2605,7 @@ def render_booking_page(
         end_date_value = selected_date
         dates = [selected_date]
 
-    reservations = get_reservations_for_range(
-        instrument_id,
-        start_date_value,
-        end_date_value,
-    )
-
-    blocked_periods = get_blocked_periods_for_range(
+    reservations, blocked_periods = get_calendar_data(
         instrument_id,
         start_date_value,
         end_date_value,
@@ -3688,6 +3760,12 @@ def main() -> None:
         instruments
     )
 
+    current_instrument = next(
+        instrument
+        for instrument in instruments
+        if instrument["id"] == current_instrument_id
+    )
+
     # スマホでは上部の機器選択のみを使用する。
     # サイドバー側の機器選択を同時に描画すると、
     # 2つのradioが独立したSession Stateを持ち、
@@ -3764,7 +3842,8 @@ def main() -> None:
         return
 
     render_booking_page(
-        current_instrument_id
+        current_instrument_id,
+        current_instrument,
     )
 
 
